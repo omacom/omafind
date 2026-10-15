@@ -52,6 +52,9 @@ pub struct State {
     pub current: Option<String>,
     pub roots: Vec<Root>,
     pub config: Config,
+    /// Why indexing can't run (the model files are missing, the worker dies while starting), for the status to say
+    /// instead of "indexing" forever. Cleared when a worker starts and gets ready.
+    pub problem: Option<String>,
 }
 
 impl State {
@@ -67,6 +70,8 @@ impl State {
             "waiting_for_ac"
         } else if self.config.power.pause_in_power_saver && self.power.power_saver {
             "paused_power_saver"
+        } else if self.problem.is_some() {
+            "stuck"
         } else if self.starting {
             "starting"
         } else if self.crawling {
@@ -133,6 +138,7 @@ pub fn status(
         failed: stats.failed + code.failed,
         chunks: stats.chunks + code.chunks,
         state: state.state_name().into(),
+        problem: state.problem.clone(),
         current: state.current.clone(),
         paused: state.paused,
         on_battery: state.power.on_battery,
@@ -156,6 +162,8 @@ pub fn broadcast(shared: &Shared, event: Event) {
 struct Worker {
     child: Child,
     stdin: std::process::ChildStdin,
+    /// It loaded the model: an exit before that is a failure to start, not the end of a queue.
+    ready: bool,
 }
 
 struct Coordinator {
@@ -307,13 +315,32 @@ impl Coordinator {
                 }
                 Msg::Worker(line) => self.worker_line(line)?,
                 Msg::WorkerExited => {
+                    let mut started = true;
                     if let Some(mut worker) = self.worker.take() {
                         let _ = worker.child.wait();
+                        started = worker.ready;
                     }
-                    self.shared.state.lock().unwrap().worker_running = false;
-                    self.shared.state.lock().unwrap().current = None;
-                    // Files that landed while it was finishing.
-                    self.maybe_start_worker()?;
+                    {
+                        let mut state = self.shared.state.lock().unwrap();
+                        state.worker_running = false;
+                        state.current = None;
+                        if !started {
+                            // Starting it again straight away would fail the same way, in a loop. The next file
+                            // change, `resume` or setup tries again.
+                            state.problem = Some(
+                                "The indexer stopped while loading the model: `journalctl --user -u omafindd` says why"
+                                    .into(),
+                            );
+                        }
+                    }
+                    if started {
+                        // Files that landed while it was finishing.
+                        self.maybe_start_worker()?;
+                    } else {
+                        crate::log!(
+                            "worker exited before it was ready; not restarting it until something changes"
+                        );
+                    }
                     self.send_status()?;
                 }
                 Msg::Shutdown => {
@@ -576,6 +603,22 @@ impl Coordinator {
         if self.store.stats()?.pending == 0 && self.code_store.stats()?.pending == 0 {
             return Ok(());
         }
+        // Without the model the worker can only exit; say so once rather than start it over and over.
+        let models = omafind_core::model::dir();
+        if let Err(error) = omafind_embed::Models::locate(&models) {
+            let problem = format!(
+                "The model files aren't in {}: `omafind setup` downloads them",
+                omafind_core::paths::tilde(&models)
+            );
+            let mut state = self.shared.state.lock().unwrap();
+            if state.problem.as_ref() != Some(&problem) {
+                crate::log!("not indexing: {error:#}");
+                state.problem = Some(problem);
+                drop(state);
+                self.send_status()?;
+            }
+            return Ok(());
+        }
         let exe = std::env::current_exe().context("own path")?;
         let mut child = Command::new(exe)
             .arg("--worker")
@@ -600,8 +643,16 @@ impl Coordinator {
                 }
                 let _ = tx.send(Msg::WorkerExited);
             })?;
-        self.worker = Some(Worker { child, stdin });
-        self.shared.state.lock().unwrap().worker_running = true;
+        self.worker = Some(Worker {
+            child,
+            stdin,
+            ready: false,
+        });
+        {
+            let mut state = self.shared.state.lock().unwrap();
+            state.worker_running = true;
+            state.problem = None;
+        }
         crate::log!("worker started");
         Ok(())
     }
@@ -609,6 +660,9 @@ impl Coordinator {
     fn worker_line(&mut self, line: Line) -> Result<()> {
         match line {
             Line::Ready { seconds, device } => {
+                if let Some(worker) = &mut self.worker {
+                    worker.ready = true;
+                }
                 crate::log!("worker ready in {seconds:.1} s ({device})")
             }
             Line::Reading { path, .. } => {
@@ -651,7 +705,7 @@ impl Coordinator {
     fn send_status(&mut self) -> Result<()> {
         self.last_status = Instant::now();
         let status = status(&self.shared, &self.store, &self.code_store, &self.searcher)?;
-        broadcast(&self.shared, Event::Status(status));
+        broadcast(&self.shared, Event::Status(Box::new(status)));
         Ok(())
     }
 

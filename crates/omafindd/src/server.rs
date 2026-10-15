@@ -71,9 +71,9 @@ fn serve(
                 let (event_tx, event_rx) = channel::<Event>();
                 shared.subscribers.lock().unwrap().push(event_tx);
                 // The current state first, so a new subscriber never starts blank.
-                let first = Event::Status(
+                let first = Event::Status(Box::new(
                     searcher.with_stores(|main, code| status(&shared, main, code, &searcher))?,
-                );
+                ));
                 send_event(&mut writer, &first)?;
                 for event in event_rx {
                     if send_event(&mut writer, &event).is_err() {

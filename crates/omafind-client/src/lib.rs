@@ -143,8 +143,11 @@ pub struct Status {
     pub pending: i64,
     pub failed: i64,
     pub chunks: i64,
-    /// `idle`, `indexing`, `paused`, `paused_power_saver`, `waiting_for_ac`, `crawling`.
+    /// `idle`, `indexing`, `paused`, `paused_power_saver`, `waiting_for_ac`, `crawling`, `starting`, `stuck`.
     pub state: String,
+    /// Why indexing can't run, in words, when `state` is `stuck`.
+    #[serde(default)]
+    pub problem: Option<String>,
     /// The file being read right now.
     pub current: Option<String>,
     pub paused: bool,
@@ -179,7 +182,7 @@ pub struct Root {
 pub enum Event {
     /// Counts changed (a file indexed, a crawl finished, a pause toggled). Carries the whole status so the client
     /// never has to ask.
-    Status(Status),
+    Status(Box<Status>),
     Indexed {
         path: PathBuf,
         kind: FileKind,

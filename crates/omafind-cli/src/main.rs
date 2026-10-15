@@ -265,7 +265,8 @@ fn watch(intro: bool) -> Result<()> {
     let client = Client::connect()?;
     if !std::io::stderr().is_terminal() {
         let mut busy_seen = false;
-        return client.subscribe(|event| {
+        let mut stuck = false;
+        client.subscribe(|event| {
             match event {
                 omafind_client::Event::Status(s) => {
                     let current = s
@@ -279,6 +280,11 @@ fn watch(intro: bool) -> Result<()> {
                         "{:<18} {} indexed, {} pending, {} failed{current}",
                         s.state, s.indexed, s.pending, s.failed
                     );
+                    if let Some(problem) = &s.problem {
+                        eprintln!("not indexing: {problem}");
+                        stuck = true;
+                        return false;
+                    }
                     if finished(&s, &mut busy_seen) {
                         return false;
                     }
@@ -298,7 +304,11 @@ fn watch(intro: bool) -> Result<()> {
                 }
             }
             true
-        });
+        })?;
+        if stuck {
+            std::process::exit(1);
+        }
+        return Ok(());
     }
     // On a terminal: one bar over every file, the one being read as its message.
     if intro {
@@ -314,6 +324,7 @@ fn watch(intro: bool) -> Result<()> {
     let mut bar: Option<cliclack::ProgressBar> = None;
     let mut summary = String::new();
     let mut busy_seen = false;
+    let mut stuck = false;
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     client.subscribe(|event| {
         match event {
@@ -323,6 +334,16 @@ fn watch(intro: bool) -> Result<()> {
                     .as_deref()
                     .map(|c| omafind_core::paths::tilde(std::path::Path::new(c)));
                 let phase = phase(&s);
+                // Waiting would never end: say why and stop.
+                if s.state == "stuck" {
+                    match bar.take() {
+                        Some(bar) => bar.error(phase.clone()),
+                        None => waiting.error(phase.clone()),
+                    }
+                    summary = "Indexing can't go on until that is fixed".into();
+                    stuck = true;
+                    return false;
+                }
                 if finished(&s, &mut busy_seen) {
                     let line = format!(
                         "{} files indexed, {} failed",
@@ -371,6 +392,9 @@ fn watch(intro: bool) -> Result<()> {
     report_failures(&failures)?;
     if summary.is_empty() {
         cliclack::outro_cancel("omafindd went away")?;
+    } else if stuck {
+        cliclack::outro_cancel(summary)?;
+        std::process::exit(1);
     } else {
         cliclack::outro(summary)?;
     }
@@ -385,6 +409,7 @@ fn phase(s: &omafind_client::Status) -> String {
         "paused" => "Paused · `omafind resume` goes on".into(),
         "paused_power_saver" => "Paused while the power profile is power-saver".into(),
         "waiting_for_ac" => "Waiting for a charger".into(),
+        "stuck" => s.problem.clone().unwrap_or_else(|| "Not indexing".into()),
         "indexing" if s.current.is_none() => "Loading the model".into(),
         "indexing" => "Reading files".into(),
         _ if s.pending > 0 => format!(
@@ -940,6 +965,10 @@ fn status_framed(s: &omafind_client::Status) -> Result<()> {
             cliclack::log::warning("Paused while the power profile is power-saver")?
         }
         "waiting_for_ac" => cliclack::log::warning("Waiting for a charger")?,
+        "stuck" => cliclack::log::error(format!(
+            "Not indexing: {}",
+            s.problem.as_deref().unwrap_or("see `omafind doctor`")
+        ))?,
         _ => cliclack::log::success("Up to date, watching for changes")?,
     }
     ui::line(ui::bold("Folders"));
@@ -1044,6 +1073,9 @@ fn status(index_path: &std::path::Path, json: bool) -> Result<()> {
                 .map(|c| format!(" ({})", omafind_core::paths::tilde(std::path::Path::new(c))))
                 .unwrap_or_default()
         );
+        if let Some(problem) = &status.problem {
+            println!("problem: {problem}");
+        }
         for root in &status.roots {
             println!(
                 "root:  {}{}",

@@ -83,6 +83,8 @@ export interface Status {
   /** Whether a config with folders exists (a daemon restart must not look like a first run). */
   configured: boolean;
   state: string;
+  /** Why indexing can't run, when `state` is "stuck". */
+  problem: string | null;
   files: number; indexed: number; pending: number; failed: number;
   current: string | null;
   paused: boolean; onBattery: boolean; powerSaver: boolean; queryEncoderLoaded: boolean;
@@ -328,6 +330,13 @@ fn status_value(state: &State) -> HostValue {
             } else {
                 "no_daemon"
             },
+        )
+        .field(
+            "problem",
+            s.problem
+                .as_deref()
+                .map(HostValue::from)
+                .unwrap_or(HostValue::Null),
         )
         .field("files", s.files as f64)
         .field("indexed", s.indexed as f64)
@@ -932,7 +941,7 @@ fn follow_daemon(tx: async_channel::Sender<Note>) {
                 let tx2 = tx.clone();
                 let _ = client.subscribe(|event| {
                     if let omafind_client::Event::Status(status) = event {
-                        return tx2.send_blocking(Note::Status(Box::new(status))).is_ok();
+                        return tx2.send_blocking(Note::Status(status)).is_ok();
                     }
                     true
                 });

@@ -181,10 +181,14 @@ fn index() -> Vec<Check> {
                 .ok()
         })
         .flatten();
+    let stuck = status.as_ref().and_then(|s| s.problem.clone());
     checks.push(Check::new(
-        running,
+        running && stuck.is_none(),
         "omafindd",
         match &status {
+            Some(s) if s.problem.is_some() => {
+                format!("not indexing: {}", stuck.unwrap_or_default())
+            }
             Some(s) => format!(
                 "{} · {} indexed, {} pending, {} failed",
                 s.state, s.indexed, s.pending, s.failed
