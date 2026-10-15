@@ -1,0 +1,8 @@
+[package]
+name = "dig-core"
+description = "Shared types, prompts, schema and ranking for Dig."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

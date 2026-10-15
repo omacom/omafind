@@ -1,0 +1,15 @@
+[package]
+name = "dig-app"
+description = "The Dig search window: a GPUI Shell host running the QuickJS UI in ui/."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dig-core = { path = "../dig-core" }
+gpui-kit.workspace = true
+gpui-shell.workspace = true
+anyhow.workspace = true
+serde_json.workspace = true
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

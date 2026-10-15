@@ -1,0 +1,6 @@
+target/
+evals/testbed/
+PLAN.md
+docs/
+ui/gpui-kit.d.ts
+ui/node_modules/
