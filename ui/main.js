@@ -43,7 +43,8 @@ export default class Dig extends View {
     this.decided = false;
     this.focusField(cx);
     cx.timer.after(3000, (cx) => {
-      if (!this.decided && !status().daemon) {
+      const s = status();
+      if (!this.decided && !s.daemon && !s.configured) {
         this.decided = true;
         this.openSetup(cx, true);
       }

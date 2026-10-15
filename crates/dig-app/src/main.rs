@@ -49,6 +49,8 @@ export interface Status {
   visible: boolean;
   /** Increments every time the window is shown; the script resets its search on a change. */
   shown: number;
+  /** Whether a config with folders exists (a daemon restart must not look like a first run). */
+  configured: boolean;
   state: string;
   files: number; indexed: number; pending: number; failed: number;
   current: string | null;
@@ -172,6 +174,7 @@ fn status_value(state: &State) -> HostValue {
         .field("daemon", state.daemon)
         .field("visible", state.visible)
         .field("shown", state.shown as f64)
+        .field("configured", dig_core::config::Config::load().map(|c| !c.folders().is_empty() || !c.code_roots().is_empty()).unwrap_or(false))
         .field("state", if state.daemon { s.state.as_str() } else { "no_daemon" })
         .field("files", s.files as f64)
         .field("indexed", s.indexed as f64)
