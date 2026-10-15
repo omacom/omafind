@@ -21,7 +21,8 @@ untested (polkit refuses `powerprofilesctl` from an agent shell). Phase 5 (the w
 Hyprland keeps its window in the `special:dig` workspace (packaging/hypr-window-rules.lua) and `dig toggle` flips
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
 subscribes to digd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `dig setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
-through gum, systemd user unit, Hyprland binding/rules/autostart lines marked `-- dig`), `dig doctor`, `dig eval`
+through gum, systemd user unit, `~/.config/hypr/dig.lua`), the same setup as a screen in the window (first run, or
+Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`downloadModels`), `dig doctor`, `dig eval`
 (recall@1/@5 over `evals/queries.json`), `dig uninstall`, code index (`code:` prefix, separate `code.sqlite`,
 whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/dig/engine).
 Notes with numbers: `docs/phase-0.md`.
@@ -50,7 +51,7 @@ crates/dig-app       GPUI Shell host: window (app id `dig`), `dig` host module (
                      copy/hide), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs (colors.toml → tokens,
                      watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/dig/thumbs), actions.rs
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
-packaging/           PKGBUILD, dig.desktop, hypr-window-rules.lua, hypr-binding.lua (what `dig setup` appends)
+packaging/           PKGBUILD, dig.desktop, dig.lua (what `dig setup` writes to ~/.config/hypr/dig.lua)
 install.sh           from-checkout install for one user, then `dig setup`
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
 evals/               make-testbed.sh; evals/testbed/ holds local test media (ignored)
@@ -99,6 +100,14 @@ cargo test --release
 `sudo` needs a password in agent sessions: ask the user to install packages. Already on Omarchy: `ffmpeg`,
 `tesseract`, `mpv`, `imv`, `evince`, `gum`, `wtype`, `grim`.
 
+## Throughput (measured 2026-10-15, RX 480 / 8 threads)
+
+Text: ~15 passages/s (~350 tokens each) on the GPU whatever the batch size (2k–16k tokens; flash attention is on by
+default and matters: off is 2–4× slower); 1.6/s on the CPU. Photos at 140 tokens: 0.73 s each on the GPU, 13.6 s on
+the CPU. So the GPU is the default and the model is the floor; the indexer overlaps extraction (OCR, pdftotext,
+ffmpeg) with embedding on a 4-thread pool. `embed-spike bench` reproduces the numbers; `DIG_KV_UNIFIED=0` and
+`DIG_FLASH=0|1` are experiment knobs.
+
 ## Ranking (dig-core::ranking)
 
 Query → prompted embed → KNN top 200 (`vec0`, cosine) + FTS5 top 200 over the query's content words (stopwords
@@ -135,7 +144,10 @@ Dispatchers are Lua: `hl.dsp.workspace.toggle_special("dig")`, `hl.dsp.window.mo
 follow = false, window = "class:dig" })`, `hl.dsp.window.float({ window = "class:dig", action = "on" })`; the old
 `togglespecialworkspace` spelling is gone (`focuswindow class:dig` still works). Over the IPC socket the command is
 `dispatch <lua>`. Events on `.socket2.sock`: `activespecial>>special:dig,eDP-1` when opened, `activespecial>>,eDP-1`
-when closed. Window rules in the user's `~/.config/hypr/windows.lua` use `o.window({ class = "^dig$" }, { … })`.
+when closed. Dig's rules, binding and autostart live in one file, `~/.config/hypr/dig.lua`, loaded by
+`require("hypr.dig") -- dig` appended to `~/.config/hypr/hyprland.lua`: Omarchy's user `hyprland.lua` requires
+`hypr.bindings` and `hypr.autostart` but not every version loads a `windows.lua`, so a file of our own with its own
+require is the only arrangement that works everywhere. `dig uninstall` removes both.
 
 ## GPUI Shell notes for the UI (Phase 5)
 

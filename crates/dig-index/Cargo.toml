@@ -11,6 +11,7 @@ dig-embed = { path = "../dig-embed" }
 dig-extract = { path = "../dig-extract" }
 dig-store = { path = "../dig-store" }
 anyhow.workspace = true
+serde.workspace = true
 ignore = "0.4"
 
 [dev-dependencies]

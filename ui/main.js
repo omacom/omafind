@@ -8,6 +8,7 @@ import { View, div, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
 import { search, thumb, status, open, reveal, copy, hide } from "dig";
 import { FILTERS, glyph, count } from "./kinds.js";
+import { Setup } from "./setup.js";
 /** @import { AsyncContext, Context } from "gpui-kit" */
 /** @import { Result } from "dig" */
 
@@ -35,7 +36,33 @@ export default class Dig extends View {
     this.focus = cx.focus_handle();
     this.focus.focus();
     this.shown = status().shown;
+    this.mode = "search";
+    this.setup = new Setup();
+    // First run? Decided once the daemon has answered (see render); if it never does, after a moment: the
+    // daemon isn't installed yet, and the setup screen is where that happens.
+    this.decided = false;
     this.focusField(cx);
+    cx.timer.after(3000, (cx) => {
+      if (!this.decided && !status().daemon) {
+        this.decided = true;
+        this.openSetup(cx, true);
+      }
+    });
+  }
+
+  openSetup(cx, firstRun) {
+    this.mode = "setup";
+    this.firstRun = firstRun;
+    this.setup.load(cx);
+    cx.notify();
+    // The search field had the keyboard and is gone with this mode: the root takes it, once it has rendered.
+    cx.timer.after(30, () => this.focus.focus());
+  }
+
+  closeSetup(cx) {
+    this.mode = "search";
+    this.focusField(cx);
+    cx.notify();
   }
 
   /** Moves the keyboard onto the search field: the root holds it, the field is the next tab stop. */
@@ -125,9 +152,20 @@ export default class Dig extends View {
 
   /** @param {import("gpui-kit").KeyEvent} event @param {Context} cx */
   onKey(event, cx) {
+    if (this.mode === "setup") {
+      switch (event.keystroke) {
+        case "escape": if (this.firstRun) hide(); else this.closeSetup(cx); return;
+        case "down": case "ctrl-n": case "ctrl-j": case "tab": this.setup.move(1, cx); return;
+        case "up": case "ctrl-p": case "ctrl-k": case "shift-tab": this.setup.move(-1, cx); return;
+        case "space": this.setup.toggle(cx); return;
+        case "enter": this.setup.apply(cx, (_message, cx) => { this.firstRun = false; this.closeSetup(cx); }); return;
+      }
+      return;
+    }
     const row = this.results[this.selected];
     switch (event.keystroke) {
       case "escape": hide(); return;
+      case "ctrl-,": this.openSetup(cx, false); return;
       case "down": case "ctrl-n": case "ctrl-j": this.move(1, cx); return;
       case "up": case "ctrl-p": case "ctrl-k": this.move(-1, cx); return;
       case "pagedown": this.move(8, cx); return;
@@ -214,7 +252,11 @@ export default class Dig extends View {
       .text_size(11)
       .text_color(colors.muted_foreground)
       .child(div().child(left))
-      .child(div().child("↑↓ move · ⏎ open · ⌃⏎ reveal · ⌃C copy · ⇥ filter · esc close"));
+      .child(
+        h_flex().gap(12)
+          .child(div().child(this.mode === "setup" ? "↑↓ move · space toggle · ⏎ start · esc back" : "↑↓ move · ⏎ open · ⌃⏎ reveal · ⌃C copy · ⇥ filter · esc close"))
+          .child(div().id("settings").text_size(12).text_color(colors.muted_foreground).on_click((_e, cx) => this.mode === "setup" ? this.closeSetup(cx) : this.openSetup(cx, false)).child("\u{f013}")),
+      );
   }
 
   empty(cx) {
@@ -250,6 +292,13 @@ export default class Dig extends View {
   render(cx) {
     const colors = cx.theme().colors;
     const s = status();
+    if (!this.decided && s.daemon) {
+      this.decided = true;
+      if (s.roots.length === 0) {
+        // Deferred: a render must not start a retained screen by itself.
+        cx.timer.after(0, (cx) => this.openSetup(cx, true));
+      }
+    }
     if (s.shown !== this.shown) {
       // Shown again: fresh field, keyboard on it.
       this.shown = s.shown;
@@ -258,6 +307,15 @@ export default class Dig extends View {
       this.tookMs = null;
       this.searched = "";
       this.focusField(cx);
+    }
+    if (this.mode === "setup") {
+      return v_flex()
+        .size_full()
+        .bg(colors.background)
+        .track_focus(this.focus)
+        .on_key_down((event, cx) => this.onKey(event, cx))
+        .child(this.setup.render(cx, this.firstRun))
+        .child(this.footer(cx));
     }
     const results = this.results;
     const filters = h_flex().gap(14).items_center().children(

@@ -1,13 +1,12 @@
 //! `dig setup`: models, folders, the daemon, the window, the key. Each step asks (with `gum`) unless `--yes`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
-use dig_core::FileKind;
 use dig_core::config::Config;
 
-use crate::{download, hypr};
+use dig_setup::{download, hypr};
 
 pub struct Options {
     pub yes: bool,
@@ -53,48 +52,7 @@ fn choose(header: &str, items: &[(String, bool)], yes: bool) -> Vec<String> {
     }
 }
 
-/// What a folder holds, for the picker: counts by kind and a rough first-pass time on this machine.
-fn survey(path: &Path) -> (usize, String) {
-    let (candidates, _) = dig_index::crawl(&dig_index::Root { path: path.to_path_buf(), code: false });
-    let mut by_kind = std::collections::BTreeMap::new();
-    let mut seconds = 0.0;
-    for c in &candidates {
-        *by_kind.entry(c.kind).or_insert(0usize) += 1;
-        seconds += match c.kind {
-            FileKind::Image => 0.8,
-            FileKind::Screenshot => 1.8,
-            FileKind::Doc => 0.4,
-            FileKind::Pdf => 3.0,
-            FileKind::Audio => 0.4 * (c.size as f64 / 1_000_000.0).max(0.5),
-            FileKind::Video => 2.0 * (c.size as f64 / 20_000_000.0).max(0.5),
-            FileKind::Code => 1.0,
-        };
-    }
-    let parts: Vec<String> = by_kind.iter().map(|(k, n)| format!("{n} {}", plural(*k, *n))).collect();
-    let time = if seconds < 60.0 { format!("{seconds:.0} s") } else if seconds < 3600.0 { format!("{:.0} min", seconds / 60.0) } else { format!("{:.1} h", seconds / 3600.0) };
-    (candidates.len(), format!("{} (about {time} on the GPU)", if parts.is_empty() { "nothing to index".into() } else { parts.join(", ") }))
-}
-
-fn plural(kind: FileKind, n: usize) -> &'static str {
-    match (kind, n) {
-        (FileKind::Image, 1) => "photo",
-        (FileKind::Image, _) => "photos",
-        (FileKind::Screenshot, 1) => "screenshot",
-        (FileKind::Screenshot, _) => "screenshots",
-        (FileKind::Pdf, 1) => "PDF",
-        (FileKind::Pdf, _) => "PDFs",
-        (FileKind::Doc, 1) => "document",
-        (FileKind::Doc, _) => "documents",
-        (FileKind::Audio, 1) => "recording",
-        (FileKind::Audio, _) => "recordings",
-        (FileKind::Video, 1) => "video",
-        (FileKind::Video, _) => "videos",
-        (FileKind::Code, _) => "code files",
-    }
-}
-
 pub fn run(options: Options) -> Result<()> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("no HOME")?);
     let dry = options.dry_run;
     eprintln!("Dig setup");
 
@@ -118,31 +76,22 @@ pub fn run(options: Options) -> Result<()> {
     let folders: Vec<PathBuf> = if !options.folders.is_empty() {
         options.folders.iter().map(|p| dig_index::indexer::resolve_root(p)).collect::<Result<_>>()?
     } else {
-        let candidates = ["Pictures", "Documents", "Downloads", "Videos", "Music", "Desktop", "Notes", "Books"];
-        let existing: Vec<PathBuf> = candidates.iter().map(|c| home.join(c)).filter(|p| p.is_dir()).collect();
-        let already = config.folders();
         eprintln!("• looking at your folders…");
-        let labelled: Vec<(String, bool)> = existing
-            .iter()
-            .map(|p| {
-                let (_, summary) = survey(p);
-                let on = already.is_empty() && matches!(p.file_name().and_then(|n| n.to_str()), Some("Pictures" | "Documents")) || already.contains(p);
-                (format!("{:<14} {summary}", dig_core::paths::tilde(p)), on)
-            })
-            .collect();
+        let candidates = dig_setup::candidate_folders(&config);
+        let labelled: Vec<(String, bool)> = candidates.iter().map(|(s, on)| (format!("{:<14} {}", dig_core::paths::tilde(&s.path), s.summary()), *on)).collect();
         let chosen = choose("Which folders should Dig index? (space to toggle, enter to confirm)", &labelled, options.yes);
-        existing.into_iter().filter(|p| chosen.iter().any(|c| c.starts_with(&dig_core::paths::tilde(p)))).collect()
+        candidates.into_iter().map(|(s, _)| s.path).filter(|p| chosen.iter().any(|c| c.starts_with(&dig_core::paths::tilde(p)))).collect()
     };
     let code: Vec<PathBuf> = if !options.code.is_empty() {
         options.code.iter().map(|p| dig_index::indexer::resolve_root(p)).collect::<Result<_>>()?
     } else if !options.yes && have("gum") {
-        let candidates: Vec<PathBuf> = ["dev", "src", "code", "projects", "Projects", "repos", "work"].iter().map(|c| home.join(c)).filter(|p| p.is_dir()).collect();
+        let candidates = dig_setup::candidate_code_folders(&config);
         if candidates.is_empty() {
             Vec::new()
         } else {
-            let labelled: Vec<(String, bool)> = candidates.iter().map(|p| (dig_core::paths::tilde(p), config.code_roots().contains(p))).collect();
+            let labelled: Vec<(String, bool)> = candidates.iter().map(|(s, on)| (format!("{:<14} {}", dig_core::paths::tilde(&s.path), s.summary()), *on)).collect();
             let chosen = choose("Index code too? Searched separately with a `code:` prefix (enter to skip)", &labelled, false);
-            candidates.into_iter().filter(|p| chosen.contains(&dig_core::paths::tilde(p))).collect()
+            candidates.into_iter().map(|(s, _)| s.path).filter(|p| chosen.iter().any(|c| c.starts_with(&dig_core::paths::tilde(p)))).collect()
         }
     } else {
         config.code_roots()
@@ -159,13 +108,9 @@ pub fn run(options: Options) -> Result<()> {
 
     // 3. The daemon.
     if confirm("Start the indexing daemon now and at every login (systemd user service)?", options.yes) && !dry {
-        install_unit()?;
-        let ok = Command::new("systemctl").args(["--user", "daemon-reload"]).status().map(|s| s.success()).unwrap_or(false)
-            && Command::new("systemctl").args(["--user", "enable", "--now", "digd"]).status().map(|s| s.success()).unwrap_or(false);
-        if ok {
-            eprintln!("• digd is running");
-        } else {
-            eprintln!("• couldn't start digd with systemd; run `digd` by hand to see why");
+        match dig_setup::start_daemon(&std::env::current_exe()?.with_file_name("digd")) {
+            Ok(()) => eprintln!("• digd is running"),
+            Err(error) => eprintln!("• couldn't start digd with systemd ({error:#}); run `digd` by hand to see why"),
         }
         if dig_client::Client::is_running() {
             if let Ok(mut client) = dig_client::Client::connect() {
@@ -174,44 +119,29 @@ pub fn run(options: Options) -> Result<()> {
         }
     }
 
-    // 4. Hyprland: autostart, keybinding, window rules.
-    let mut reload = false;
-    for snippet in &hypr::SNIPPETS {
-        if hypr::is_installed(snippet) {
-            eprintln!("• {} already in ~/.config/hypr/{}", snippet.what, snippet.file);
-            continue;
-        }
-        if confirm(&format!("Add {} to ~/.config/hypr/{}?", snippet.what, snippet.file), options.yes) && !dry {
-            hypr::install(snippet)?;
-            reload = true;
+    // 4. Hyprland: keybinding, window rules, autostart, in ~/.config/hypr/dig.lua.
+    let have = hypr::installed();
+    let mut wanted = hypr::Parts::default();
+    for (part, slot, what) in [
+        (have.binding, &mut wanted.binding, "the SUPER + CTRL + G keybinding"),
+        (have.rules, &mut wanted.rules, "the window rules (floating, centred, in the special:dig workspace)"),
+        (have.autostart, &mut wanted.autostart, "starting dig-app with the session"),
+    ] {
+        if part {
+            eprintln!("• {what} already in ~/.config/hypr/dig.lua");
+        } else if confirm(&format!("Add {what} to ~/.config/hypr/dig.lua?"), options.yes) && !dry {
+            *slot = true;
         }
     }
-    if reload {
-        hypr::reload();
+    if dig_setup::install_hyprland(wanted.binding, wanted.rules, wanted.autostart)? {
         eprintln!("• Hyprland reloaded");
     }
 
     // 5. The window, resident from now on.
-    if !dry && Command::new("hyprctl").args(["-j", "clients"]).output().map(|o| !String::from_utf8_lossy(&o.stdout).contains("\"class\": \"dig\"")).unwrap_or(false) {
-        let exe = std::env::current_exe()?.with_file_name("dig-app");
-        let program = if exe.exists() { exe } else { PathBuf::from("dig-app") };
-        let _ = Command::new("setsid").arg("-f").arg(program).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+    if !dry && dig_setup::start_app(&std::env::current_exe()?.with_file_name("dig-app"))? {
         eprintln!("• dig-app started; SUPER + CTRL + G opens it");
     }
     eprintln!("Done. `dig status` shows the indexer, `dig doctor` checks everything.");
-    Ok(())
-}
-
-/// The user unit, pointing at this build's `digd`, unless a packaged unit exists in /usr/lib/systemd/user.
-fn install_unit() -> Result<()> {
-    if Path::new("/usr/lib/systemd/user/digd.service").exists() {
-        return Ok(());
-    }
-    let digd = std::env::current_exe()?.with_file_name("digd");
-    let unit = include_str!("../../../systemd/digd.service").replace("/usr/bin/digd", &digd.to_string_lossy());
-    let dir = dig_core::paths::config_dir().parent().context("config dir")?.join("systemd/user");
-    std::fs::create_dir_all(&dir)?;
-    std::fs::write(dir.join("digd.service"), unit)?;
     Ok(())
 }
 

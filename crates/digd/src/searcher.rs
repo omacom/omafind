@@ -64,7 +64,7 @@ impl Searcher {
         if inner.embedder.is_none() {
             let t = Instant::now();
             let models = Models::locate(&dig_core::model::dir())?;
-            inner.embedder = Some(Embedder::new(&models, &Options { text_only: true, cpu_only: self.cpu, threads: 0 }).context("loading the query encoder")?);
+            inner.embedder = Some(Embedder::new(&models, &Options { text_only: true, cpu_only: self.cpu, ..Options::default() }).context("loading the query encoder")?);
             crate::log!("query encoder loaded in {:.2} s", t.elapsed().as_secs_f64());
         }
         self.wake.notify_all();

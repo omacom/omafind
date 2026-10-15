@@ -17,10 +17,10 @@ From this checkout (an AUR package follows):
 ./install.sh
 ```
 
-That builds Dig, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and runs `dig setup`, which downloads
-the model files (865 MB), lets you pick the folders to index, starts the indexing daemon at login, and adds the
-keybinding, the window rules and the autostart line to your Hyprland config, asking before each step.
-`dig doctor` checks everything afterwards; `dig uninstall` takes it all out again.
+That builds Dig, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and runs `dig setup`. Setup can also be
+done in the window itself: the first time it opens it asks which folders to index, downloads the model files
+(865 MB) and adds the keybinding, window rules and autostart line (`~/.config/hypr/dig.lua`). `dig doctor` checks
+everything afterwards; `dig uninstall` takes it all out again. Ctrl+, in the window reopens the settings.
 
 ## Use
 

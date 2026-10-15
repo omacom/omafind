@@ -5,6 +5,7 @@ pub mod crawler;
 pub mod indexer;
 pub mod rules;
 pub mod search;
+pub mod survey;
 
 pub use crawler::{Candidate, Root, crawl};
 pub use indexer::{Event, Indexer};

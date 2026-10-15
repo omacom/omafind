@@ -52,11 +52,15 @@ pub struct Options {
     pub cpu_only: bool,
     /// Threads for CPU work. 0 = every logical processor up to 8.
     pub threads: i32,
+    /// Tokens one model run holds (0 = 512 text-only, 2048 otherwise). Bigger runs embed more passages at once.
+    pub batch_tokens: usize,
+    /// Inputs one model run holds at most (0 = 16).
+    pub batch_sequences: i32,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { text_only: false, cpu_only: false, threads: 0 }
+        Self { text_only: false, cpu_only: false, threads: 0, batch_tokens: 0, batch_sequences: 0 }
     }
 }
 
@@ -157,6 +161,7 @@ pub struct Embedder {
     /// The width of encoder rows fed to the text model.
     row_size: usize,
     max_tokens: usize,
+    max_sequences: i32,
     sequences: i32,
     tokens: usize,
     position: sys::llama_pos,
@@ -192,13 +197,19 @@ impl Embedder {
             }
             // One input must fit one micro-batch: 2048 tokens (the reference's cut), which also holds a 1120-token
             // image or a 750-token 30 s clip. Queries are short, so the query encoder reserves less and cuts at 512.
-            let max_tokens: usize = if options.text_only { 512 } else { 2048 };
+            let max_tokens: usize = if options.batch_tokens > 0 { options.batch_tokens.max(2048.min(if options.text_only { 512 } else { 2048 })) } else if options.text_only { 512 } else { 2048 };
+            let max_sequences = if options.batch_sequences > 0 { options.batch_sequences } else { MAX_SEQUENCES };
             let mut params = sys::llama_context_default_params();
             params.n_ctx = max_tokens as u32;
             params.n_batch = max_tokens as u32;
             params.n_ubatch = max_tokens as u32;
-            params.n_seq_max = MAX_SEQUENCES as u32;
-            params.kv_unified = true; // each input may use the whole context, as in llama-embedding
+            params.n_seq_max = max_sequences as u32;
+            // Experiment knobs (see docs): a unified KV lets one input use the whole context, but every input then
+            // attends over the whole batch under a mask.
+            params.kv_unified = std::env::var("DIG_KV_UNIFIED").map(|v| v != "0").unwrap_or(true);
+            if let Ok(v) = std::env::var("DIG_FLASH") {
+                params.flash_attn_type = if v == "1" { sys::LLAMA_FLASH_ATTN_TYPE_ENABLED } else { sys::LLAMA_FLASH_ATTN_TYPE_DISABLED };
+            }
             params.embeddings = true;
             params.pooling_type = sys::LLAMA_POOLING_TYPE_MEAN;
             params.n_threads = threads;
@@ -234,6 +245,7 @@ impl Embedder {
                 dim: sys::llama_model_n_embd_out(model) as usize,
                 row_size: sys::llama_model_n_embd_inp(model) as usize,
                 max_tokens,
+                max_sequences,
                 sequences: 0,
                 tokens: 0,
                 position: 0,
@@ -255,7 +267,7 @@ impl Embedder {
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
             let tokens = self.tokenize(text);
-            if self.sequences == MAX_SEQUENCES || self.tokens + tokens.len() > self.max_tokens {
+            if self.sequences == self.max_sequences || self.tokens + tokens.len() > self.max_tokens {
                 vectors.extend(self.run()?);
             }
             self.begin();
@@ -417,8 +429,9 @@ impl Embedder {
                 );
             }
             tokens.truncate(count.max(0) as usize);
-            if tokens.len() > self.max_tokens {
-                tokens.truncate(self.max_tokens - 1);
+            let cut = self.max_tokens.min(if self.text_only { 512 } else { 2048 });
+            if tokens.len() > cut {
+                tokens.truncate(cut - 1);
                 tokens.push(sys::llama_vocab_eos(self.vocab));
             }
             tokens

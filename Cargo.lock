@@ -1892,6 +1892,8 @@ dependencies = [
  "async-channel",
  "dig-client",
  "dig-core",
+ "dig-index",
+ "dig-setup",
  "gpui-kit",
  "gpui-shell",
  "notify",
@@ -1911,11 +1913,10 @@ dependencies = [
  "dig-core",
  "dig-embed",
  "dig-index",
+ "dig-setup",
  "dig-store",
  "serde",
  "serde_json",
- "sha2 0.11.1",
- "ureq",
 ]
 
 [[package]]
@@ -1969,7 +1970,21 @@ dependencies = [
  "dig-extract",
  "dig-store",
  "ignore",
+ "serde",
  "tempfile",
+]
+
+[[package]]
+name = "dig-setup"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "dig-client",
+ "dig-core",
+ "dig-index",
+ "serde",
+ "sha2 0.11.1",
+ "ureq",
 ]
 
 [[package]]

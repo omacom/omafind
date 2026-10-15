@@ -4,7 +4,7 @@ use std::process::Command;
 
 use anyhow::Result;
 
-use crate::{download, hypr};
+use dig_setup::{download, hypr};
 
 struct Check {
     ok: bool,
@@ -82,14 +82,14 @@ pub fn run(json: bool) -> Result<bool> {
             None => "not running: systemctl --user enable --now digd".into(),
         },
     });
-    let unit_enabled = Command::new("systemctl").args(["--user", "is-enabled", "digd"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled").unwrap_or(false);
+    let unit_enabled = dig_setup::daemon_enabled();
     checks.push(Check { ok: unit_enabled, what: "digd at login".into(), detail: if unit_enabled { "enabled".into() } else { "not enabled: run `dig setup`".into() } });
 
     let window = Command::new("hyprctl").args(["-j", "clients"]).output().map(|o| String::from_utf8_lossy(&o.stdout).contains("\"class\": \"dig\"")).unwrap_or(false);
     checks.push(Check { ok: window, what: "dig-app window".into(), detail: if window { "resident".into() } else { "not running: `dig toggle` starts it".into() } });
-    for snippet in &hypr::SNIPPETS {
-        let ok = hypr::is_installed(snippet);
-        checks.push(Check { ok, what: format!("hypr/{}: {}", snippet.file, snippet.what), detail: if ok { "present".into() } else { "missing: run `dig setup`".into() } });
+    let parts = hypr::installed();
+    for (ok, what) in [(parts.binding, "SUPER + CTRL + G keybinding"), (parts.rules, "window rules (special:dig, floating, centred)"), (parts.autostart, "dig-app at login")] {
+        checks.push(Check { ok, what: format!("hypr/dig.lua: {what}"), detail: if ok { "present".into() } else { "missing: run `dig setup`".into() } });
     }
 
     let all_ok = checks.iter().all(|c| c.ok);

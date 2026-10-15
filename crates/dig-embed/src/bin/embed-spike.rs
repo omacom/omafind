@@ -57,7 +57,7 @@ fn load(args: &Args) -> Result<Embedder> {
     let dir = args.models.clone().unwrap_or_else(dig_core::model::dir);
     let models = Models::locate(&dir)?;
     let started = Instant::now();
-    let embedder = Embedder::new(&models, &Options { text_only: args.text_only, cpu_only: args.cpu, threads: 0 })?;
+    let embedder = Embedder::new(&models, &Options { text_only: args.text_only, cpu_only: args.cpu, ..Options::default() })?;
     eprintln!(
         "loaded in {:.2} s: llama.cpp {}, backends {:?}, gpu {}{}",
         started.elapsed().as_secs_f64(),
@@ -232,9 +232,31 @@ fn text(args: &Args) -> Result<bool> {
     Ok(true)
 }
 
+/// Text throughput at several batch sizes: 96 passages of ~350 tokens each.
+fn bench(args: &Args) -> Result<bool> {
+    let models = Models::locate(&args.models.clone().unwrap_or_else(dig_core::model::dir))?;
+    let passages: Vec<String> = (0..96)
+        .map(|i| prompts::document(Some("notes"), &format!("Meeting note {i}: the review moved to room {} because the projector failed again, and the team agreed to send the slides the night before. ", i % 7 + 2).repeat(9)))
+        .collect();
+    for (tokens, seqs) in [(2048usize, 16i32), (4096, 32), (8192, 64), (16384, 64)] {
+        let mut embedder = Embedder::new(&models, &Options { text_only: false, cpu_only: args.cpu, threads: 0, batch_tokens: tokens, batch_sequences: seqs })?;
+        let started = Instant::now();
+        let out = embedder.embed_texts(&passages)?;
+        let secs = started.elapsed().as_secs_f64();
+        println!("batch {tokens:>5} tokens × {seqs:>2} seqs: {} passages in {secs:.2} s = {:.1} passages/s", out.len(), out.len() as f64 / secs);
+    }
+    let images = files(&args.testbed.clone().unwrap_or_else(|| PathBuf::from("evals/testbed")).join("img"), &["jpg", "jpeg", "png"])?;
+    let mut embedder = Embedder::new(&models, &Options { cpu_only: args.cpu, ..Options::default() })?;
+    let started = Instant::now();
+    let n = embedder.embed_images(&images, 140)?.len();
+    println!("images: {n} in {:.2} s = {:.2} s each", started.elapsed().as_secs_f64(), started.elapsed().as_secs_f64() / n.max(1) as f64);
+    Ok(true)
+}
+
 fn main() -> Result<()> {
     let args = parse()?;
     let passed = match args.command.as_str() {
+        "bench" => bench(&args)?,
         "demo" => demo(&args)?,
         "golden" => golden(&args)?,
         "text" => text(&args)?,

@@ -41,6 +41,15 @@ pub struct Skipped {
 /// Every indexable file under `root`, plus what was skipped. Hidden entries and `.gitignore`d files never appear.
 pub fn crawl(root: &Root) -> (Vec<Candidate>, Skipped) {
     let mut out = Vec::new();
+    let skipped = walk(root, |c| {
+        out.push(c);
+        true
+    });
+    (out, skipped)
+}
+
+/// Walks `root`, handing each candidate to `each` until it returns false. Returns what was skipped.
+pub fn walk(root: &Root, mut each: impl FnMut(Candidate) -> bool) -> Skipped {
     let mut skipped = Skipped::default();
     let huge: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
     let huge_in_filter = huge.clone();
@@ -66,7 +75,7 @@ pub fn crawl(root: &Root) -> (Vec<Candidate>, Skipped) {
                 return true;
             }
             let name = entry.file_name().to_string_lossy();
-            if rules::skip_dir(&name) {
+            if rules::skip_dir(&name) || rules::is_system_tree(entry.path()) {
                 ignored_in_filter.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
@@ -124,12 +133,14 @@ pub fn crawl(root: &Root) -> (Vec<Candidate>, Skipped) {
             continue;
         }
         let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-        out.push(Candidate { path: path.to_path_buf(), kind, mtime, size: meta.len() });
+        if !each(Candidate { path: path.to_path_buf(), kind, mtime, size: meta.len() }) {
+            break;
+        }
     }
     skipped.huge_dirs = std::mem::take(&mut *huge.lock().unwrap());
     skipped.code_project_dirs = code_dirs;
     skipped.hidden_or_ignored_dirs = ignored_dirs.load(Ordering::Relaxed);
-    (out, skipped)
+    skipped
 }
 
 /// `~`-relative display of a root.

@@ -1,10 +1,9 @@
 //! `dig`: index folders and search them. Everything the window does is reachable here.
 
 mod doctor;
-mod download;
 mod eval;
-mod hypr;
 mod setup;
+
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -186,19 +185,19 @@ fn watch() -> Result<()> {
 
 fn load_embedder(text_only: bool, cpu: bool) -> Result<Embedder> {
     let models = Models::locate(&dig_core::model::dir())?;
-    Embedder::new(&models, &Options { text_only, cpu_only: cpu, threads: 0 }).context("loading the model")
+    Embedder::new(&models, &Options { text_only, cpu_only: cpu, ..Options::default() }).context("loading the model")
 }
 
 fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>, reset: bool, cpu: bool) -> Result<()> {
     let mut roots: Vec<Root> = folders.iter().map(|p| dig_index::indexer::resolve_root(p).map(|path| Root { path, code: false })).collect::<Result<_>>()?;
     roots.extend(code.iter().map(|p| dig_index::indexer::resolve_root(p).map(|path| Root { path, code: true })).collect::<Result<Vec<_>>>()?);
-    // The folders are remembered in the config, which the daemon reads too.
-    if !roots.is_empty() {
+    // The folders are remembered in the config, which the daemon reads too (not for a test index elsewhere).
+    if !roots.is_empty() && *index_path == dig_core::paths::index_path() {
         let mut config = dig_core::config::Config::load().unwrap_or_default();
         config.set_folders(&roots.iter().filter(|r| !r.code).map(|r| r.path.clone()).collect::<Vec<_>>(), &roots.iter().filter(|r| r.code).map(|r| r.path.clone()).collect::<Vec<_>>());
         config.save()?;
     }
-    if Client::is_running() && !reset {
+    if Client::is_running() && !reset && *index_path == dig_core::paths::index_path() {
         let mut client = Client::connect()?;
         if roots.is_empty() {
             client.simple(&Request::Reindex)?;

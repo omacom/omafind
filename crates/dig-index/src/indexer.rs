@@ -39,6 +39,8 @@ pub struct Indexer<'a> {
 const ROUND: usize = 32;
 /// Texts per model batch (the context holds 16 sequences).
 const TEXT_BATCH: usize = 16;
+/// Files read at once; each reader may be a tesseract, pdftotext or ffmpeg process.
+const EXTRACT_THREADS: usize = 4;
 
 impl<'a> Indexer<'a> {
     /// Crawls `roots`, records what's there, forgets what's gone, and indexes everything pending.
@@ -69,19 +71,35 @@ impl<'a> Indexer<'a> {
             if files.is_empty() {
                 break;
             }
-            // Read every file of the round first, so their texts can share model batches.
-            let mut work: Vec<(dig_store::FileRow, Vec<Chunk>)> = Vec::new();
+            // Read every file of the round first, several at a time (OCR, pdftotext and ffmpeg are separate
+            // processes that would otherwise wait on each other), so their texts can share model batches.
             let mut stopped = false;
-            for file in files {
-                if !(self.gate)() {
-                    stopped = true;
-                    break;
+            if !(self.gate)() {
+                break;
+            }
+            if let Some(first) = files.first() {
+                (self.on_event)(Event::Reading { path: first.path.clone(), kind: first.kind });
+            }
+            let queue = std::sync::Mutex::new(files.into_iter());
+            let results: std::sync::Mutex<Vec<(dig_store::FileRow, Result<Vec<Chunk>, String>)>> = std::sync::Mutex::new(Vec::new());
+            let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(2, EXTRACT_THREADS);
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let (queue, results) = (&queue, &results);
+                    scope.spawn(move || loop {
+                        let Some(file) = queue.lock().unwrap().next() else { break };
+                        let result = dig_extract::extract(&file.path, file.kind).map_err(|e| format!("{e:#}"));
+                        results.lock().unwrap().push((file, result));
+                    });
                 }
-                (self.on_event)(Event::Reading { path: file.path.clone(), kind: file.kind });
-                match dig_extract::extract(&file.path, file.kind) {
+            });
+            let mut extracted = results.into_inner().unwrap();
+            extracted.sort_by_key(|(file, _)| file.id);
+            let mut work: Vec<(dig_store::FileRow, Vec<Chunk>)> = Vec::new();
+            for (file, result) in extracted {
+                match result {
                     Ok(chunks) => work.push((file, chunks)),
                     Err(error) => {
-                        let error = format!("{error:#}");
                         self.store.mark_failed(file.id, &error)?;
                         failed += 1;
                         (self.on_event)(Event::Failed { path: file.path, error });
@@ -117,6 +135,10 @@ impl<'a> Indexer<'a> {
             // Media, one at a time (each is its own model run).
             for (i, (file, chunks)) in work.iter().enumerate() {
                 if chunks.iter().any(|c| matches!(c.embed, Embed::Image { .. } | Embed::Audio { .. })) {
+                    if !(self.gate)() {
+                        stopped = true;
+                        break;
+                    }
                     (self.on_event)(Event::Reading { path: file.path.clone(), kind: file.kind });
                 }
                 for (j, chunk) in chunks.iter().enumerate() {

@@ -39,6 +39,13 @@ pub fn present(dir: &Path, file: &ModelFile) -> bool {
 
 /// Fetches `file` into `dir` unless it is there, reporting progress on stderr.
 pub fn fetch(dir: &Path, file: &ModelFile) -> Result<()> {
+    fetch_with(dir, file, &mut |done, total| {
+        eprint!("\r{}: {:>3}% of {} MB   ", file.name, done * 100 / total.max(1), total / 1_000_000);
+    })
+}
+
+/// Like `fetch`, with progress as (bytes done, bytes total).
+pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
     let target = dir.join(file.name);
     if target.exists() {
         return Ok(());
@@ -50,7 +57,7 @@ pub fn fetch(dir: &Path, file: &ModelFile) -> Result<()> {
         eprintln!("{}: copying from the Hugging Face cache", file.name);
         std::fs::copy(&cached, &part)?;
     } else {
-        download(&part, file)?;
+        download(&part, file, progress)?;
     }
     let size = std::fs::metadata(&part)?.len();
     if size != file.bytes {
@@ -67,7 +74,7 @@ pub fn fetch(dir: &Path, file: &ModelFile) -> Result<()> {
     Ok(())
 }
 
-fn download(part: &Path, file: &ModelFile) -> Result<()> {
+fn download(part: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
     let url = format!("https://huggingface.co/{}/resolve/{}/{}", dig_core::model::REPOSITORY, dig_core::model::REVISION, file.name);
     let have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     if have >= file.bytes {
@@ -88,7 +95,6 @@ fn download(part: &Path, file: &ModelFile) -> Result<()> {
     let mut done = if resume { have } else { 0 };
     let mut body = response.into_body().into_reader();
     let mut buffer = vec![0u8; 1 << 20];
-    let started = std::time::Instant::now();
     let mut last_report = std::time::Instant::now();
     loop {
         let n = body.read(&mut buffer)?;
@@ -99,11 +105,10 @@ fn download(part: &Path, file: &ModelFile) -> Result<()> {
         done += n as u64;
         if last_report.elapsed().as_millis() >= 200 {
             last_report = std::time::Instant::now();
-            let rate = done as f64 / started.elapsed().as_secs_f64().max(0.001) / 1e6;
-            eprint!("\r{}: {:>3}% of {} MB ({rate:.0} MB/s)   ", file.name, done * 100 / file.bytes, file.bytes / 1_000_000);
+            progress(done, file.bytes);
         }
     }
-    eprintln!("\r{}: downloaded {} MB                    ", file.name, done / 1_000_000);
+    progress(done, file.bytes);
     Ok(())
 }
 

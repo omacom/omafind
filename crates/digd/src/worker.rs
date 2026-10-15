@@ -63,7 +63,7 @@ pub fn main() -> Result<()> {
     let models = Models::locate(&dig_core::model::dir())?;
     let cpu = config.search.device == "cpu";
     let started = std::time::Instant::now();
-    let mut embedder = Embedder::new(&models, &Options { text_only: false, cpu_only: cpu, threads: 0 })?;
+    let mut embedder = Embedder::new(&models, &Options { text_only: false, cpu_only: cpu, ..Options::default() })?;
     emit(&Line::Ready { seconds: started.elapsed().as_secs_f64(), device: if dig_embed::gpu_found() && !cpu { "gpu".into() } else { "cpu".into() } });
     store.set_meta("llama_version", dig_embed::LLAMA_VERSION)?;
 

@@ -362,9 +362,12 @@ impl Coordinator {
                     }
                 }
                 _ => {
-                    // Gone (or not a plain file any more).
-                    if store.remove_file(&path)? {
-                        touched += 1;
+                    // Gone (or not a plain file any more): the path itself, and everything that was under it when it
+                    // was a folder.
+                    let removed = store.remove_file(&path)? as usize + store.remove_missing(&path, &HashSet::new())?;
+                    if removed > 0 {
+                        crate::log!("{} gone: {removed} files dropped", dig_core::paths::tilde(&path));
+                        touched += removed;
                     }
                 }
             }

@@ -63,6 +63,26 @@ export function open(path: string, kind: string, locator: number | null): boolea
 export function reveal(path: string): boolean;
 export function copy(path: string): boolean;
 export function hide(): void;
+
+/** A folder the setup screen offers. */
+export interface Folder { path: string; label: string; summary: string; selected: boolean; files: number }
+export interface Candidates {
+  folders: Folder[];
+  /** Folders that look like code, for the optional code index. */
+  code: Folder[];
+  textModel: boolean; mediaModel: boolean;
+  daemonEnabled: boolean;
+  binding: boolean; rules: boolean; autostart: boolean;
+}
+/** Surveys the candidate folders (a few seconds at most). */
+export function candidates(): Promise<Candidates>;
+/** Saves the folders, starts the daemon at login if needed, adds the Hyprland lines; answers with a summary. */
+export function applySetup(options: { folders: string[]; code: string[]; hyprland: boolean; autostart: boolean }): Promise<string>;
+/** Downloads the model files that are missing; progress through `setupProgress()`. */
+export function downloadModels(): Promise<boolean>;
+export function setupProgress(): { message: string; fraction: number } | null;
+export function pause(): void;
+export function resume(): void;
 "#;
 
 /// The scripts' assets: their own directory (icons), plus the thumbnail cache by absolute path and nothing else.
@@ -96,6 +116,17 @@ struct State {
     visible: bool,
     shown: u64,
     query_words: Vec<String>,
+    /// What setup is doing right now (a download), for the screen.
+    setup_progress: Option<(String, f64)>,
+}
+
+/// Where threads send notes for the main thread (set once the app runs).
+static NOTES: std::sync::OnceLock<async_channel::Sender<Note>> = std::sync::OnceLock::new();
+
+fn note(note: Note) {
+    if let Some(tx) = NOTES.get() {
+        let _ = tx.send_blocking(note);
+    }
 }
 
 type Shared = Arc<Mutex<State>>;
@@ -106,6 +137,8 @@ enum Note {
     Shown,
     Hidden,
     Theme,
+    /// Host state the script reads changed: re-describe.
+    Refresh,
 }
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Result<T, HostError> {
@@ -153,11 +186,130 @@ fn status_value(state: &State) -> HostValue {
         .into()
 }
 
+fn folder_value(survey: &dig_index::survey::Survey, selected: bool) -> HostValue {
+    HostObject::new()
+        .field("path", survey.path.to_string_lossy().into_owned())
+        .field("label", dig_core::paths::tilde(&survey.path))
+        .field("summary", survey.summary())
+        .field("selected", selected)
+        .field("files", survey.files as f64)
+        .into()
+}
+
+fn strings(value: Option<&HostValue>) -> Vec<String> {
+    match value {
+        Some(HostValue::Array(items)) => items.iter().filter_map(|i| match i { HostValue::Str(s) => Some(s.clone()), _ => None }).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn dig_module(shared: Shared) -> HostModule {
     let for_status = shared.clone();
     let for_search = shared.clone();
     let for_open = shared.clone();
+    let for_progress = shared.clone();
+    let for_download = shared.clone();
     HostModule::new("dig")
+        .function("setupProgress", move |_| {
+            Ok(match &for_progress.lock().unwrap().setup_progress {
+                Some((message, fraction)) => HostObject::new().field("message", message.as_str()).field("fraction", *fraction).into(),
+                None => HostValue::Null,
+            })
+        })
+        .function("pause", |_| {
+            tell_daemon(Request::Pause);
+            Ok(HostValue::Null)
+        })
+        .function("resume", |_| {
+            tell_daemon(Request::Resume);
+            Ok(HostValue::Null)
+        })
+        .async_function("candidates", |_| {
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let value = executor
+                    .spawn(async move {
+                        let config = dig_core::config::Config::load().unwrap_or_default();
+                        let folders = dig_setup::candidate_folders(&config);
+                        let code = dig_setup::candidate_code_folders(&config);
+                        let models = dig_core::model::dir();
+                        let hypr = dig_setup::hypr::installed();
+                        HostValue::from(
+                            HostObject::new()
+                                .field("folders", HostValue::Array(folders.iter().map(|(s, on)| folder_value(s, *on)).collect()))
+                                .field("code", HostValue::Array(code.iter().map(|(s, on)| folder_value(s, *on)).collect()))
+                                .field("textModel", dig_setup::download::present(&models, &dig_setup::download::TEXT))
+                                .field("mediaModel", dig_setup::download::present(&models, &dig_setup::download::MEDIA))
+                                .field("daemonEnabled", dig_setup::daemon_enabled())
+                                .field("binding", hypr.binding)
+                                .field("rules", hypr.rules)
+                                .field("autostart", hypr.autostart),
+                        )
+                    })
+                    .await;
+                Ok(value)
+            })
+        })
+        .async_function("downloadModels", move |_| {
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            let shared = for_download.clone();
+            Ok(async move {
+                let result = executor
+                    .spawn(async move {
+                        let models = dig_core::model::dir();
+                        for file in [&dig_setup::download::TEXT, &dig_setup::download::MEDIA] {
+                            if dig_setup::download::present(&models, file) {
+                                continue;
+                            }
+                            let name = if file.name == dig_core::model::TEXT_FILE { "text model" } else { "image and audio encoders" };
+                            let shared2 = shared.clone();
+                            let outcome = dig_setup::download::fetch_with(&models, file, &mut |done, total| {
+                                shared2.lock().unwrap().setup_progress = Some((format!("Downloading the {name} ({} of {} MB)", done / 1_000_000, total / 1_000_000), done as f64 / total.max(1) as f64));
+                                note(Note::Refresh);
+                            });
+                            shared.lock().unwrap().setup_progress = None;
+                            note(Note::Refresh);
+                            outcome?;
+                        }
+                        Ok::<(), anyhow::Error>(())
+                    })
+                    .await;
+                match result {
+                    Ok(()) => Ok(HostValue::from(true)),
+                    Err(error) => Err(HostError::new(format!("{error:#}"))),
+                }
+            })
+        })
+        .async_function("applySetup", |arguments| {
+            let options = arguments.get(0);
+            let folders: Vec<PathBuf> = strings(options.and_then(|o| o.get("folders"))).into_iter().map(PathBuf::from).collect();
+            let code: Vec<PathBuf> = strings(options.and_then(|o| o.get("code"))).into_iter().map(PathBuf::from).collect();
+            let hyprland = options.and_then(|o| o.get("hyprland")).map(|v| matches!(v, HostValue::Bool(true))).unwrap_or(true);
+            let autostart = options.and_then(|o| o.get("autostart")).map(|v| matches!(v, HostValue::Bool(true))).unwrap_or(true);
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let result = executor
+                    .spawn(async move {
+                        let mut done = Vec::new();
+                        dig_setup::set_folders(&folders, &code)?;
+                        done.push(format!("indexing {} folder{}", folders.len() + code.len(), if folders.len() + code.len() == 1 { "" } else { "s" }));
+                        if !Client::is_running() || !dig_setup::daemon_enabled() {
+                            let digd = std::env::current_exe()?.with_file_name("digd");
+                            dig_setup::start_daemon(&digd)?;
+                            done.push("daemon started".into());
+                        }
+                        if dig_setup::install_hyprland(hyprland, hyprland, autostart)? {
+                            done.push("Hyprland set up".into());
+                        }
+                        Ok::<String, anyhow::Error>(done.join(", "))
+                    })
+                    .await;
+                match result {
+                    Ok(message) => Ok(HostValue::from(message)),
+                    Err(error) => Err(HostError::new(format!("{error:#}"))),
+                }
+            })
+        })
         .declarations(DIG_TYPES)
         .function("status", move |_| Ok(status_value(&for_status.lock().unwrap())))
         .async_function("search", move |arguments| {
@@ -322,6 +474,7 @@ fn main() {
 
     let shared: Shared = Arc::new(Mutex::new(State::default()));
     let (tx, rx) = async_channel::unbounded::<Note>();
+    let _ = NOTES.set(tx.clone());
     {
         let tx = tx.clone();
         std::thread::Builder::new().name("dig-daemon".into()).spawn(move || follow_daemon(tx)).expect("thread");
@@ -430,6 +583,7 @@ fn main() {
                             tell_daemon(Request::Idle);
                             refresh = false;
                         }
+                        Note::Refresh => {}
                         Note::Theme => match theme::Palette::load() {
                             Ok(palette) => {
                                 tracing::info!("theme changed: retinting");

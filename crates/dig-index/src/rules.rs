@@ -11,6 +11,7 @@ use dig_core::FileKind;
 const SKIP_DIRS: &[&str] = &[
     "node_modules", "bower_components", "target", "build", "dist", "__pycache__", "venv", "Pods", "DerivedData",
     "cache", "Cache", "caches", "Caches", "Trash", "lost+found", "steamapps", "thumbnails", "Thumbnails", "icons",
+    "squashfs-root", "AppDir", "rootfs", "sysroot", "initramfs",
 ];
 
 /// Marks of a code project: inside one, only screenshots are read unless the folder is a code root.
@@ -42,6 +43,12 @@ pub fn skip_dir(name: &str) -> bool {
 
 pub fn is_code_project(dir: &Path) -> bool {
     PROJECT_MARKERS.iter().any(|m| dir.join(m).exists())
+}
+
+/// An unpacked system image or install tree (an AppImage's contents, a container root, a firmware dump): thousands
+/// of files nobody looks for. `usr` with `bin` or `lib` beside it says so.
+pub fn is_system_tree(dir: &Path) -> bool {
+    dir.join("usr").is_dir() && (dir.join("bin").exists() || dir.join("lib").exists() || dir.join("etc").is_dir())
 }
 
 pub fn is_secret(path: &Path) -> bool {
