@@ -1,0 +1,58 @@
+# Maintainer: Taha Nejad <paprikataha@gmail.com>
+# Dig: local semantic file search for Omarchy. Builds the Rust workspace and bundles llama.cpp's own prebuilt
+# release (no compiling of llama.cpp): the libraries land in /usr/lib/dig/engine, the headers only serve the build.
+pkgname=dig
+pkgver=0.0.1
+pkgrel=1
+pkgdesc="Local, on-device semantic search over your files (photos, PDFs, documents, audio, video)"
+arch=(x86_64 aarch64)
+url="https://github.com/tahayvr/dig"
+license=(MIT)
+_llama=b11635
+depends=(gcc-libs glibc vulkan-icd-loader ffmpeg ffmpegthumbnailer poppler tesseract tesseract-data-eng wl-clipboard libxkbcommon)
+optdepends=('pandoc-cli: .doc and .rtf documents' 'mpv: open recordings at a moment' 'evince: open PDFs at a page' 'imv: open photos' 'gum: prompts in dig setup')
+makedepends=(cargo clang)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
+        "llama-$_llama-src.tar.gz::https://github.com/ggml-org/llama.cpp/archive/refs/tags/$_llama.tar.gz")
+source_x86_64=("https://github.com/ggml-org/llama.cpp/releases/download/$_llama/llama-$_llama-bin-ubuntu-vulkan-x64.tar.gz")
+source_aarch64=("https://github.com/ggml-org/llama.cpp/releases/download/$_llama/llama-$_llama-bin-ubuntu-vulkan-arm64.tar.gz")
+sha256sums=('SKIP' 'SKIP')
+sha256sums_x86_64=('b70f9cc1b40ed1ebf5ba7d73b6b1585fd2c955e85acee954c24a1659f7b439e5')
+sha256sums_aarch64=('4d4192252556e27a848383a6cf1ae652ca4b8350ab6fffd4c5eff26f857d4db8')
+options=(!lto)
+
+prepare() {
+  # The engine prefix the build links against: upstream's libraries plus the matching headers.
+  mkdir -p engine/lib engine/include
+  find "llama-$_llama" \( -name 'libllama.so*' -o -name 'libmtmd.so*' -o -name 'libggml*.so*' \) ! -name 'libggml-rpc.so' -exec cp -a {} engine/lib/ \;
+  local src="llama.cpp-$_llama"
+  cp "$src"/include/llama.h "$src"/ggml/include/{ggml.h,ggml-alloc.h,ggml-backend.h,ggml-cpu.h,ggml-opt.h,gguf.h} "$src"/tools/mtmd/{mtmd.h,mtmd-helper.h} engine/include/
+  echo "$_llama-vulkan" > engine/VERSION
+  cd "$pkgname-$pkgver"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export DIG_LLAMA_DIR="$srcdir/engine" DIG_LLAMA_RPATH=/usr/lib/dig/engine
+  export CARGO_TARGET_DIR=target
+  cargo build --release --frozen
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export DIG_LLAMA_DIR="$srcdir/engine"
+  cargo test --release --frozen -p dig-core -p dig-store -p dig-extract -p dig-index
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/dig target/release/digd target/release/dig-app -t "$pkgdir/usr/bin/"
+  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js -t "$pkgdir/usr/share/dig/ui/"
+  install -Dm644 packaging/hypr-window-rules.lua packaging/hypr-binding.lua -t "$pkgdir/usr/share/dig/hypr/"
+  install -Dm644 systemd/digd.service -t "$pkgdir/usr/lib/systemd/user/"
+  install -Dm644 packaging/dig.desktop -t "$pkgdir/usr/share/applications/"
+  install -dm755 "$pkgdir/usr/lib/dig/engine"
+  cp -a "$srcdir/engine/lib/." "$pkgdir/usr/lib/dig/engine/"
+  install -Dm644 "$srcdir/llama-$_llama/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.llama.cpp"
+}

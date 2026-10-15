@@ -5,6 +5,7 @@
 //! audio, video and code; each is one more `match` arm here.
 
 pub mod classify;
+pub mod code;
 pub mod media;
 pub mod ocr;
 pub mod office;
@@ -59,7 +60,7 @@ pub const FRAME_BUDGET: usize = 70;
 
 /// Whether this build reads files of `kind` (later phases add the rest).
 pub fn supported(kind: FileKind) -> bool {
-    matches!(kind, FileKind::Screenshot | FileKind::Image | FileKind::Doc | FileKind::Pdf | FileKind::Audio | FileKind::Video)
+    matches!(kind, FileKind::Screenshot | FileKind::Image | FileKind::Doc | FileKind::Pdf | FileKind::Audio | FileKind::Video | FileKind::Code)
 }
 
 /// The chunks of `path`, which `classify` said is a `kind`. The file name chunk comes first so a file is always
@@ -101,7 +102,7 @@ pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
         FileKind::Pdf => chunks.extend(pdf::extract(path)?),
         FileKind::Audio => chunks.extend(media::extract_audio(path)?),
         FileKind::Video => chunks.extend(media::extract_video(path)?),
-        FileKind::Code => anyhow::bail!("code files aren't read yet"),
+        FileKind::Code => chunks.extend(code::extract(path)?),
     }
     Ok(chunks)
 }

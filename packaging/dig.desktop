@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Dig
+Comment=Search your files by what they are about
+Exec=dig toggle
+Icon=system-search
+Terminal=false
+Categories=Utility;
+Keywords=search;semantic;files;photos;documents;
+StartupWMClass=dig
+NoDisplay=false

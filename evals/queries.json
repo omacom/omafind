@@ -1,0 +1,16 @@
+[
+  { "query": "a dog on the beach", "expect": "dog_beach" },
+  { "query": "snowy mountains", "expect": "mountain_lake" },
+  { "query": "a red sports car", "expect": "red_car" },
+  { "query": "a plate of pasta", "expect": "spaghetti" },
+  { "query": "the clause about pets in the lease", "expect": "lease-agreement" },
+  { "query": "security deposit returned", "expect": "lease-agreement" },
+  { "query": "how long to bake the cake", "expect": "chocolate-cake" },
+  { "query": "payment declined error", "expect": "support-log", "note": "the screenshot is a close second" },
+  { "query": "INV-20394", "expect": "support-log", "note": "exact string" },
+  { "query": "DO_NOT_HONOR", "expect": "support-log", "note": "exact string" },
+  { "query": "where they talk about sleep", "expect": "speech_sleep" },
+  { "query": "buying groceries", "expect": "speech_groceries" },
+  { "query": "a delayed flight", "expect": "speech_flight_delay" },
+  { "query": "dentist appointment", "expect": "reminder" }
+]

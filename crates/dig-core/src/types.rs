@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What a file is, for indexing and for grouping results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FileKind {
     Screenshot,

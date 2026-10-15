@@ -71,18 +71,24 @@ impl State {
     }
 }
 
-/// The status, from the shared state and a store connection.
+/// The code index lives beside the main one: `index.sqlite` → `code.sqlite`.
+pub fn code_index_path(index_path: &std::path::Path) -> PathBuf {
+    index_path.with_file_name("code.sqlite")
+}
+
+/// The status, from the shared state and a store connection (code index counts included).
 pub fn status(shared: &Shared, store: &Store, searcher: &Searcher) -> Result<Status> {
     let state = shared.state.lock().unwrap().clone();
     let stats = store.stats()?;
+    let code = Store::open(&code_index_path(&searcher.index_path)).and_then(|s| s.stats()).unwrap_or_default();
     Ok(Status {
         version: env!("CARGO_PKG_VERSION").into(),
         roots: state.roots.clone(),
-        files: stats.files,
-        indexed: stats.indexed,
-        pending: stats.pending,
-        failed: stats.failed,
-        chunks: stats.chunks,
+        files: stats.files + code.files,
+        indexed: stats.indexed + code.indexed,
+        pending: stats.pending + code.pending,
+        failed: stats.failed + code.failed,
+        chunks: stats.chunks + code.chunks,
         state: state.state_name().into(),
         current: state.current.clone(),
         paused: state.paused,
@@ -109,6 +115,7 @@ struct Coordinator {
     shared: Arc<Shared>,
     searcher: Arc<Searcher>,
     store: Store,
+    code_store: Store,
     worker: Option<Worker>,
     tx: Sender<Msg>,
     watcher: Option<notify::RecommendedWatcher>,
@@ -118,15 +125,19 @@ struct Coordinator {
 pub fn main() -> Result<()> {
     let config = Config::load()?;
     let index_path = std::env::var_os("DIG_INDEX").map(PathBuf::from).unwrap_or_else(dig_core::paths::index_path);
+    let code_index_path = code_index_path(&index_path);
     let store = Store::open(&index_path)?;
-    if store.vector_version()? != dig_core::model::VECTOR_VERSION {
-        crate::log!("vectors {} → {}: embedding everything again", store.vector_version()?, dig_core::model::VECTOR_VERSION);
-        store.reset_all()?;
-        store.set_meta("vector_version", &dig_core::model::VECTOR_VERSION.to_string())?;
+    let code_store = Store::open(&code_index_path)?;
+    for s in [&store, &code_store] {
+        if s.vector_version()? != dig_core::model::VECTOR_VERSION {
+            crate::log!("vectors {} → {}: embedding everything again", s.vector_version()?, dig_core::model::VECTOR_VERSION);
+            s.reset_all()?;
+            s.set_meta("vector_version", &dig_core::model::VECTOR_VERSION.to_string())?;
+        }
     }
     let shared = Arc::new(Shared::default());
     let cpu = config.search.device == "cpu";
-    let searcher = Searcher::new(index_path.clone(), cpu, config.search.unload_after_minutes)?;
+    let searcher = Searcher::new(index_path.clone(), code_index_path, cpu, config.search.unload_after_minutes)?;
     let (tx, rx) = channel::<Msg>();
 
     // Roots: the config's, else what the store remembers from `dig index`.
@@ -158,7 +169,7 @@ pub fn main() -> Result<()> {
         })?;
     }
 
-    let mut coordinator = Coordinator { shared, searcher, store, worker: None, tx: tx.clone(), watcher: None, last_status: Instant::now() };
+    let mut coordinator = Coordinator { shared, searcher, store, code_store, worker: None, tx: tx.clone(), watcher: None, last_status: Instant::now() };
     coordinator.watch_roots();
     crate::log!("digd {} up: {} roots, index {}", env!("CARGO_PKG_VERSION"), roots.len(), dig_core::paths::tilde(&index_path));
     let _ = tx.send(Msg::Crawl);
@@ -235,16 +246,19 @@ impl Coordinator {
                 crate::log!("can't save config: {error:#}");
             }
             // Roots that went away take their files with them.
-            for (path, _) in self.store.roots()? {
-                if !roots.iter().any(|r| r.path == path) {
-                    self.store.remove_missing(&path, &HashSet::new())?;
-                    self.store.remove_root(&path)?;
+            for store in [&self.store, &self.code_store] {
+                for (path, _) in store.roots()? {
+                    if !roots.iter().any(|r| r.path == path) {
+                        store.remove_missing(&path, &HashSet::new())?;
+                        store.remove_root(&path)?;
+                    }
                 }
             }
             state.roots = roots.clone();
         }
         for root in &roots {
-            self.store.add_root(&root.path, root.code)?;
+            let store = if root.code { &self.code_store } else { &self.store };
+            store.add_root(&root.path, root.code)?;
         }
         self.watch_roots();
         self.crawl_all()
@@ -280,14 +294,15 @@ impl Coordinator {
         let mut pending = 0;
         for root in &roots {
             let (candidates, _) = crawl(&dig_index::Root { path: root.path.clone(), code: root.code });
+            let store = if root.code { &self.code_store } else { &self.store };
             let mut keep = HashSet::with_capacity(candidates.len());
             for c in candidates.iter().filter(|c| !dig_core::config::is_excluded(&c.path, &excludes)) {
-                let (_, changed) = self.store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
+                let (_, changed) = store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
                 pending += changed as usize;
                 keep.insert(c.path.clone());
             }
             total += keep.len();
-            self.store.remove_missing(&root.path, &keep)?;
+            store.remove_missing(&root.path, &keep)?;
         }
         crate::log!("crawled {} roots: {total} files, {pending} to index, {:.1} s", roots.len(), started.elapsed().as_secs_f64());
         self.shared.state.lock().unwrap().crawling = false;
@@ -307,22 +322,27 @@ impl Coordinator {
                 continue;
             }
             let Some(root) = roots.iter().find(|r| path.starts_with(&r.path)) else { continue };
+            let store = if root.code { &self.code_store } else { &self.store };
             if path.is_dir() {
                 // A new or renamed folder: its contents in one go.
                 let (candidates, _) = crawl(&dig_index::Root { path: path.clone(), code: root.code });
                 let mut keep = HashSet::new();
                 for c in &candidates {
-                    self.store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
+                    store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
                     keep.insert(c.path.clone());
                 }
-                self.store.remove_missing(&path, &keep)?;
+                store.remove_missing(&path, &keep)?;
                 touched += candidates.len();
                 continue;
             }
             match std::fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => {
                     let inside_code = !root.code && path.parent().is_some_and(|p| p.ancestors().take_while(|a| a.starts_with(&root.path)).any(dig_index::rules::is_code_project));
-                    let kind = dig_extract::classify::classify(&path).filter(|k| dig_extract::supported(*k));
+                    let kind = if root.code {
+                        dig_extract::code::is_code(&path).then_some(dig_core::FileKind::Code)
+                    } else {
+                        dig_extract::classify::classify(&path).filter(|k| dig_extract::supported(*k))
+                    };
                     let hidden = path.strip_prefix(&root.path).ok().is_some_and(|rel| rel.components().any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with('.') && s.len() > 1)));
                     let wanted = kind.is_some_and(|k| {
                         !dig_index::rules::is_secret(&path)
@@ -333,17 +353,17 @@ impl Coordinator {
                     match (wanted, kind) {
                         (true, Some(kind)) => {
                             let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-                            self.store.see_file(&path, mtime, meta.len() as i64, kind)?;
+                            store.see_file(&path, mtime, meta.len() as i64, kind)?;
                             touched += 1;
                         }
                         _ => {
-                            self.store.remove_file(&path)?;
+                            store.remove_file(&path)?;
                         }
                     }
                 }
                 _ => {
                     // Gone (or not a plain file any more).
-                    if self.store.remove_file(&path)? {
+                    if store.remove_file(&path)? {
                         touched += 1;
                     }
                 }
@@ -368,7 +388,7 @@ impl Coordinator {
                 return Ok(());
             }
         }
-        if self.store.stats()?.pending == 0 {
+        if self.store.stats()?.pending == 0 && self.code_store.stats()?.pending == 0 {
             return Ok(());
         }
         let exe = std::env::current_exe().context("own path")?;

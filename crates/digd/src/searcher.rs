@@ -23,7 +23,8 @@ pub struct Searcher {
     inner: Mutex<Inner>,
     wake: Condvar,
     store: Mutex<Store>,
-    index_path: PathBuf,
+    code_store: Mutex<Store>,
+    pub index_path: PathBuf,
     cpu: bool,
     unload_after: Duration,
 }
@@ -32,12 +33,14 @@ pub struct Searcher {
 const HIDE_GRACE: Duration = Duration::from_secs(120);
 
 impl Searcher {
-    pub fn new(index_path: PathBuf, cpu: bool, unload_after_minutes: u64) -> Result<Arc<Self>> {
+    pub fn new(index_path: PathBuf, code_index_path: PathBuf, cpu: bool, unload_after_minutes: u64) -> Result<Arc<Self>> {
         let store = Store::open(&index_path)?;
+        let code_store = Store::open(&code_index_path)?;
         let searcher = Arc::new(Self {
             inner: Mutex::new(Inner { embedder: None, last_used: Instant::now(), idle_since: None }),
             wake: Condvar::new(),
             store: Mutex::new(store),
+            code_store: Mutex::new(code_store),
             index_path,
             cpu,
             unload_after: Duration::from_secs(unload_after_minutes.max(1) * 60),
@@ -75,18 +78,23 @@ impl Searcher {
         self.wake.notify_all();
     }
 
+    /// A query starting with `code:` searches the code index with the code-retrieval prompt; anything else never
+    /// sees code.
     pub fn search(&self, query: &str, limit: usize, kinds: Vec<FileKind>) -> Result<Vec<Hit>> {
         self.warm()?;
         let mut inner = self.inner.lock().unwrap();
         inner.last_used = Instant::now();
         let embedder = inner.embedder.as_mut().expect("warmed");
-        let store = self.store.lock().unwrap();
-        dig_index::search(&store, embedder, query, &SearchOptions { limit, kinds, candidates: 200 })
-    }
-
-    /// A fresh connection for status queries (the search connection is busy while a search runs).
-    pub fn open_store(&self) -> Result<Store> {
-        Store::open(&self.index_path)
+        match dig_index::code_query(query) {
+            Some(code) => {
+                let store = self.code_store.lock().unwrap();
+                dig_index::search(&store, embedder, code, &SearchOptions { limit, kinds: Vec::new(), candidates: 200, code: true })
+            }
+            None => {
+                let store = self.store.lock().unwrap();
+                dig_index::search(&store, embedder, query, &SearchOptions { limit, kinds, candidates: 200, code: false })
+            }
+        }
     }
 
     /// Sleeps until the encoder has been idle long enough, then drops it. Woken by every use, so it never polls.

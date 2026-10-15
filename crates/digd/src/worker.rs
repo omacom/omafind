@@ -59,6 +59,7 @@ pub fn main() -> Result<()> {
 
     let index_path = std::env::var_os("DIG_INDEX").map(std::path::PathBuf::from).unwrap_or_else(dig_core::paths::index_path);
     let mut store = Store::open(&index_path)?;
+    let mut code_store = Store::open(&crate::daemon::code_index_path(&index_path))?;
     let models = Models::locate(&dig_core::model::dir())?;
     let cpu = config.search.device == "cpu";
     let started = std::time::Instant::now();
@@ -67,10 +68,7 @@ pub fn main() -> Result<()> {
     store.set_meta("llama_version", dig_embed::LLAMA_VERSION)?;
 
     let gate_control = control.clone();
-    let mut indexer = Indexer {
-        store: &mut store,
-        embedder: &mut embedder,
-        on_event: Box::new(|event| {
+    let on_event = |event: Event| {
             let line = match event {
                 Event::Crawled { .. } => return,
                 Event::Reading { path, kind } => Line::Reading { path: path.to_string_lossy().into_owned(), kind: kind.as_str().into() },
@@ -79,18 +77,21 @@ pub fn main() -> Result<()> {
                 Event::Done { indexed, failed, seconds } => Line::Done { indexed, failed, seconds },
             };
             emit(&line);
-        }),
-        gate: Box::new(move || {
-            let (lock, cv) = &*gate_control;
-            let mut c = lock.lock().unwrap();
-            while c.paused && !c.quit {
-                c = cv.wait(c).unwrap();
-            }
-            !c.quit
-        }),
+    };
+    let gate = move || {
+        let (lock, cv) = &*gate_control;
+        let mut c = lock.lock().unwrap();
+        while c.paused && !c.quit {
+            c = cv.wait(c).unwrap();
+        }
+        !c.quit
     };
     loop {
-        indexer.index_pending()?;
+        // The main index first (what people look for most), then code.
+        for store in [&mut store, &mut code_store] {
+            let mut indexer = Indexer { store, embedder: &mut embedder, on_event: Box::new(on_event), gate: Box::new(gate.clone()) };
+            indexer.index_pending()?;
+        }
         // Linger: wait for more work, or go away after a while so the model's memory is freed.
         let (lock, cv) = &*control;
         let mut c = lock.lock().unwrap();

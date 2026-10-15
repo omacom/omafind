@@ -1,5 +1,11 @@
 //! `dig`: index folders and search them. Everything the window does is reachable here.
 
+mod doctor;
+mod download;
+mod eval;
+mod hypr;
+mod setup;
+
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -60,6 +66,41 @@ enum Command {
     Watch,
     /// Show or hide the search window (starts dig-app if it isn't running).
     Toggle,
+    /// Download the model, pick folders, start the daemon, add the key and window rules.
+    Setup {
+        /// Accept every step without asking.
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Say what would be done, do nothing.
+        #[arg(long)]
+        dry_run: bool,
+        /// Folders to index (instead of the picker).
+        #[arg(long = "folder")]
+        folders: Vec<PathBuf>,
+        /// Code roots to index (instead of the picker).
+        #[arg(long = "code")]
+        code: Vec<PathBuf>,
+        /// Only the text model (310 MB): no photos, audio or video.
+        #[arg(long)]
+        text_only: bool,
+    },
+    /// Check the model, engine, tools, daemon, window and Hyprland config.
+    Doctor {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Measure recall over a query set with known answers (default: evals/queries.json).
+    Eval {
+        #[arg(default_value = "evals/queries.json")]
+        queries: PathBuf,
+    },
+    /// Stop the daemon, remove the Hyprland lines and (asked) the data.
+    Uninstall {
+        #[arg(long, short = 'y')]
+        yes: bool,
+        #[arg(long)]
+        keep_data: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -73,6 +114,27 @@ fn main() -> Result<()> {
         Command::Resume => Client::connect()?.simple(&Request::Resume).map(|_| println!("resumed")),
         Command::Watch => watch(),
         Command::Toggle => toggle(),
+        Command::Setup { yes, dry_run, folders, code, text_only } => setup::run(setup::Options { yes, dry_run, folders, code, text_only }),
+        Command::Doctor { json } => doctor::run(json).map(|ok| if !ok { std::process::exit(1) }),
+        Command::Eval { queries } => {
+            let cpu = cli.cpu;
+            let mut local: Option<(Store, Store, Embedder)> = None;
+            let mut search = |query: &str| -> Result<Vec<dig_core::Hit>> {
+                if Client::is_running() {
+                    return Client::connect()?.search(query, 10, Vec::new()).map(|(h, _)| h);
+                }
+                if local.is_none() {
+                    local = Some((Store::open(&index_path)?, Store::open(&index_path.with_file_name("code.sqlite"))?, load_embedder(true, cpu)?));
+                }
+                let (store, code_store, embedder) = local.as_mut().unwrap();
+                match dig_index::code_query(query) {
+                    Some(code) => dig_index::search(code_store, embedder, code, &SearchOptions { limit: 10, kinds: Vec::new(), candidates: 200, code: true }),
+                    None => dig_index::search(store, embedder, query, &SearchOptions { limit: 10, kinds: Vec::new(), candidates: 200, code: false }),
+                }
+            };
+            eval::run(&queries, &mut search).map(|ok| if !ok { std::process::exit(1) })
+        }
+        Command::Uninstall { yes, keep_data } => setup::uninstall(yes, keep_data),
     }
 }
 
@@ -150,25 +212,25 @@ fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>
         return watch();
     }
     let mut store = Store::open(index_path)?;
+    let mut code_store = Store::open(&index_path.with_file_name("code.sqlite"))?;
     if roots.is_empty() {
         roots = dig_index::indexer::stored_roots(&store)?;
+        roots.extend(dig_index::indexer::stored_roots(&code_store)?);
     }
     anyhow::ensure!(!roots.is_empty(), "nothing to index: `dig index ~/Pictures ~/Documents` picks the folders");
-    if reset || store.vector_version()? != dig_core::model::VECTOR_VERSION {
-        eprintln!("embedding everything again (vectors {})", dig_core::model::VECTOR_VERSION);
-        store.reset_all()?;
-        store.set_meta("vector_version", &dig_core::model::VECTOR_VERSION.to_string())?;
+    for s in [&store, &code_store] {
+        if reset || s.vector_version()? != dig_core::model::VECTOR_VERSION {
+            eprintln!("embedding everything again (vectors {})", dig_core::model::VECTOR_VERSION);
+            s.reset_all()?;
+            s.set_meta("vector_version", &dig_core::model::VECTOR_VERSION.to_string())?;
+        }
     }
     let started = Instant::now();
     let mut embedder = load_embedder(false, cpu)?;
     store.set_meta("llama_version", dig_embed::LLAMA_VERSION)?;
     eprintln!("model loaded in {:.1} s ({})", embedder.load_seconds, if dig_embed::gpu_found() && !cpu { "GPU" } else { "CPU" });
-    let stderr = std::io::stderr();
-    let mut indexer = Indexer {
-        store: &mut store,
-        embedder: &mut embedder,
-        on_event: Box::new(move |event| {
-            let mut err = stderr.lock();
+    let on_event = |event: Event| {
+            let mut err = std::io::stderr().lock();
             let _ = match event {
                 Event::Crawled { root, files, pending, removed, skipped_secrets, skipped_code_dirs, huge_dirs } => {
                     let mut line = format!("{}: {files} files, {pending} to index", dig_core::paths::tilde(&root));
@@ -183,10 +245,14 @@ fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>
                 Event::Failed { path, error } => writeln!(err, "  failed            {}: {error}", dig_core::paths::tilde(&path)),
                 Event::Done { indexed, failed, seconds } => writeln!(err, "{indexed} files indexed, {failed} failed, {:.1} s", seconds),
             };
-        }),
-        gate: Box::new(|| true),
     };
-    indexer.run(&roots)?;
+    let (files, code): (Vec<Root>, Vec<Root>) = roots.into_iter().partition(|r| !r.code);
+    if !files.is_empty() {
+        Indexer { store: &mut store, embedder: &mut embedder, on_event: Box::new(on_event), gate: Box::new(|| true) }.run(&files)?;
+    }
+    if !code.is_empty() {
+        Indexer { store: &mut code_store, embedder: &mut embedder, on_event: Box::new(on_event), gate: Box::new(|| true) }.run(&code)?;
+    }
     eprintln!("done in {:.1} s", started.elapsed().as_secs_f64());
     Ok(())
 }
@@ -199,12 +265,20 @@ fn search(index_path: &std::path::Path, query: &str, json: bool, kinds: &[String
         (hits, Duration::ZERO, Duration::from_secs_f64((took_ms / 1000.0).max(0.0)).min(t.elapsed()))
     } else {
         anyhow::ensure!(index_path.exists(), "no index yet: run `dig index <folders>` first");
-        let store = Store::open(index_path)?;
         let t0 = Instant::now();
         let mut embedder = load_embedder(true, cpu)?;
         let loaded = t0.elapsed();
         let t1 = Instant::now();
-        let hits = dig_index::search(&store, &mut embedder, query, &SearchOptions { limit, kinds, candidates: 200 })?;
+        let hits = match dig_index::code_query(query) {
+            Some(code) => {
+                let store = Store::open(&index_path.with_file_name("code.sqlite"))?;
+                dig_index::search(&store, &mut embedder, code, &SearchOptions { limit, kinds: Vec::new(), candidates: 200, code: true })?
+            }
+            None => {
+                let store = Store::open(index_path)?;
+                dig_index::search(&store, &mut embedder, query, &SearchOptions { limit, kinds, candidates: 200, code: false })?
+            }
+        };
         (hits, loaded, t1.elapsed())
     };
     if json {

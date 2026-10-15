@@ -104,14 +104,20 @@ pub fn crawl(root: &Root) -> (Vec<Candidate>, Skipped) {
             skipped.secrets += 1;
             continue;
         }
-        let Some(kind) = dig_extract::classify::classify(path).filter(|k| dig_extract::supported(*k)) else {
-            skipped.by_type += 1;
-            continue;
+        let kind = if root_is_code {
+            // A code root: every source file (and the repo's docs and config) as code, nothing else.
+            if dig_extract::code::is_code(path) { FileKind::Code } else { skipped.by_type += 1; continue }
+        } else {
+            let Some(kind) = dig_extract::classify::classify(path).filter(|k| dig_extract::supported(*k)) else {
+                skipped.by_type += 1;
+                continue;
+            };
+            if in_code && kind != FileKind::Screenshot {
+                // Inside somebody's project: README passages and asset images would swamp real documents.
+                continue;
+            }
+            kind
         };
-        if in_code && kind != FileKind::Screenshot {
-            // Inside somebody's project: README passages and asset images would swamp real documents.
-            continue;
-        }
         let Ok(meta) = entry.metadata() else { continue };
         if !rules::size_ok(kind, meta.len()) {
             skipped.by_size += 1;

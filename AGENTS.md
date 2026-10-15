@@ -20,8 +20,16 @@ lands; the daemon idles at 15 MB RSS without the encoder, ~300 MB with it. The p
 untested (polkit refuses `powerprofilesctl` from an agent shell). Phase 5 (the window): `dig-app` is resident;
 Hyprland keeps its window in the `special:dig` workspace (packaging/hypr-window-rules.lua) and `dig toggle` flips
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
-subscribes to digd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Notes
-with numbers: `docs/phase-0.md`. Next: Phase 6 (setup, doctor, packaging) per `PLAN.md`.
+subscribes to digd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `dig setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
+through gum, systemd user unit, Hyprland binding/rules/autostart lines marked `-- dig`), `dig doctor`, `dig eval`
+(recall@1/@5 over `evals/queries.json`), `dig uninstall`, code index (`code:` prefix, separate `code.sqlite`,
+whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/dig/engine).
+Notes with numbers: `docs/phase-0.md`.
+
+Not done / not verified: the real `dig setup` on this machine (the agent never writes the user's Hyprland config;
+run it yourself), the power-saver pause (polkit), tree-sitter function boundaries for code (whole-line stretches for
+now), a `dig-bin` AUR package from CI releases, the long-file second pass (big PDFs/recordings are capped per file),
+`dig search` highlighting of matched words in the window.
 
 ## Layout
 
@@ -35,13 +43,15 @@ crates/dig-index     rules + crawler (ignore crate, gitignore only inside repos)
 crates/dig-client    socket protocol (JSON lines: search, status, pause, resume, reindex, warm, idle, subscribe,
                      set_roots, shutdown) and the client
 crates/digd          daemon: coordinator (daemon.rs), worker child (worker.rs), watcher, power, searcher, server
-crates/dig-cli       `dig index|search|status|pause|resume|watch` (through digd when it runs, else in-process)
+crates/dig-cli       `dig index|search|status|pause|resume|watch|toggle|setup|doctor|eval|uninstall`
+                     (setup.rs, doctor.rs, eval.rs, download.rs, hypr.rs; through digd when it runs, else in-process)
 systemd/digd.service user unit: Nice=10, IOSchedulingClass=idle, CPUWeight=20, MemoryHigh=3G
 crates/dig-app       GPUI Shell host: window (app id `dig`), `dig` host module (search/thumb/status/open/reveal/
                      copy/hide), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs (colors.toml → tokens,
                      watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/dig/thumbs), actions.rs
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
-packaging/           hypr-window-rules.lua, hypr-binding.lua (appended to the user's Hyprland config by `dig setup`)
+packaging/           PKGBUILD, dig.desktop, hypr-window-rules.lua, hypr-binding.lua (what `dig setup` appends)
+install.sh           from-checkout install for one user, then `dig setup`
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
 evals/               make-testbed.sh; evals/testbed/ holds local test media (ignored)
 ```
@@ -60,7 +70,7 @@ tarballs without headers. Neither is needed.
 
 Consequences to design for:
 
-- The engine tag is pinned in `scripts/fetch-engine.sh` (`b11635`) and bumped deliberately: `embed-spike golden
+- The engine tag is pinned in `scripts/fetch-engine.sh` and `packaging/PKGBUILD` (`b11635`) and bumped deliberately: `embed-spike golden
   evals/reference` must stay ≥ 0.999 on every input, else bump `VECTOR_VERSION` (every index re-embeds). The index
   records `dig_embed::LLAMA_VERSION` and `VECTOR_VERSION`. Tags before `b11584` allocate a logits buffer per output
   token for embedding models (~1 MiB each with Gemma's 262k vocabulary): never go below it.

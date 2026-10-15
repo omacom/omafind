@@ -8,4 +8,4 @@ pub mod search;
 
 pub use crawler::{Candidate, Root, crawl};
 pub use indexer::{Event, Indexer};
-pub use search::{SearchOptions, search};
+pub use search::{SearchOptions, code_query, search};

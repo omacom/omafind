@@ -15,12 +15,21 @@ pub struct SearchOptions {
     pub kinds: Vec<FileKind>,
     /// Candidates taken from each index before fusion.
     pub candidates: usize,
+    /// The code index: the query is embedded with the code-retrieval prompt.
+    pub code: bool,
 }
 
 impl Default for SearchOptions {
     fn default() -> Self {
-        Self { limit: 20, kinds: Vec::new(), candidates: 200 }
+        Self { limit: 20, kinds: Vec::new(), candidates: 200, code: false }
     }
+}
+
+/// `code: retry with backoff` → `Some("retry with backoff")`: a search of the code index and nothing else.
+pub fn code_query(query: &str) -> Option<&str> {
+    let trimmed = query.trim_start();
+    let rest = trimmed.get(..5).filter(|p| p.eq_ignore_ascii_case("code:")).map(|_| &trimmed[5..])?;
+    Some(rest.trim())
 }
 
 pub fn search(store: &Store, embedder: &mut Embedder, query: &str, options: &SearchOptions) -> Result<Vec<Hit>> {
@@ -29,7 +38,8 @@ pub fn search(store: &Store, embedder: &mut Embedder, query: &str, options: &Sea
         return Ok(Vec::new());
     }
     let words = ranking::query_words(query);
-    let vector = embedder.embed_texts(&[prompts::query(query)])?.remove(0);
+    let prompted = if options.code { prompts::code_query(query) } else { prompts::query(query) };
+    let vector = embedder.embed_texts(&[prompted])?.remove(0);
     let nearest: Vec<VectorHit> = store
         .knn(&vector, options.candidates)?
         .into_iter()

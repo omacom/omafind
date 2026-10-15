@@ -1,6 +1,6 @@
 //! What Enter, Ctrl+Enter and Ctrl+C do with a result, with the programs Omarchy ships.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::Result;
@@ -36,8 +36,29 @@ pub fn open(path: &Path, kind: FileKind, locator: Option<Locator>, query_words: 
             detached("evince", &args)
         }
         (FileKind::Image | FileKind::Screenshot, _) => detached("imv", &[file]),
-        (FileKind::Code, _) => detached("omarchy-launch-editor", &[file]),
+        (FileKind::Code, locator) => open_in_editor(path, match locator { Some(Locator::Line(l)) => l, _ => 1 }),
         _ => detached("xdg-open", &[file]),
+    }
+}
+
+/// Omarchy's default editor (`~/.local/state/omarchy/defaults/editor`), at a line where the editor can take one:
+/// terminal editors through `omarchy-launch-tui` with `+line`, Zed/VS Code/Cursor with `file:line`.
+fn open_in_editor(path: &Path, line: u32) -> Result<()> {
+    let default = PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state/omarchy/defaults/editor");
+    let editor = std::fs::read_to_string(default).map(|s| s.trim().to_owned()).unwrap_or_else(|_| "nvim".into());
+    let file = path.to_string_lossy().into_owned();
+    let name = editor.rsplit('/').next().unwrap_or(&editor).to_owned();
+    match name.as_str() {
+        "nvim" | "vim" | "nano" | "micro" | "hx" | "helix" | "fresh" => detached("omarchy-launch-tui", &[editor, format!("+{line}"), file]),
+        "zeditor" | "zed" | "code" | "codium" | "cursor" | "windsurf" => {
+            let target = format!("{file}:{line}");
+            if name.starts_with("code") || name == "codium" || name == "cursor" || name == "windsurf" {
+                detached("setsid", &["uwsm-app".into(), "--".into(), editor, "--goto".into(), target])
+            } else {
+                detached("setsid", &["uwsm-app".into(), "--".into(), editor, target])
+            }
+        }
+        _ => detached("omarchy-launch-editor", &[file]),
     }
 }
 

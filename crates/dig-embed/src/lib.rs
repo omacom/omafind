@@ -138,6 +138,12 @@ pub fn gpu_found() -> bool {
     unsafe { GPU_FOUND }
 }
 
+/// Loads the backends without a model: (their names, whether one is a GPU). For `dig doctor`.
+pub fn probe() -> (Vec<String>, bool) {
+    init_backend(false);
+    (backend_names(), gpu_found())
+}
+
 /// EmbeddingGemma 2 loaded: text model, optional media encoders, one reusable batch. One thread at a time; dropping
 /// it frees the model (about 1 GB, or 0.25 GB text-only).
 pub struct Embedder {
