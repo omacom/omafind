@@ -8,15 +8,19 @@ or video, or code. The phase-by-phase brief is `PLAN.md` (kept out of git by `.g
 
 ## Status
 
-Phase 0 (spikes) is done, 2026-10-14. Both acceptance criteria passed on this machine (Omarchy, Hyprland 0.56,
-Radeon RX 480 on RADV, 8-thread x86-64). Notes with numbers: `docs/phase-0.md`. Next: Phase 1 (text + images,
-CLI only) per `PLAN.md`.
+Phase 0 (spikes) and Phase 1 (images + plain text, CLI only) are done, 2026-10-14, on this machine (Omarchy,
+Hyprland 0.56, Radeon RX 480 on RADV, 8-thread x86-64). Notes with numbers: `docs/phase-0.md`. Next: Phase 2
+(PDFs via poppler's `pdftotext`/`pdftoppm`, OCR via `tesseract`, docx/odt read as zipped XML) per `PLAN.md`.
 
 ## Layout
 
 ```
 crates/dig-core      prompts, model pins, VECTOR_VERSION; later schema + ranking
 crates/dig-embed     bindgen over the engine's llama.h/mtmd.h, image sizing, Embedder, `embed-spike` binary
+crates/dig-store     SQLite index: files, chunks, vec0 vectors (cosine), external-content FTS5, roots, meta
+crates/dig-extract   classify by extension; readers → chunks (name, image, passages; later pages, OCR, audio, frames)
+crates/dig-index     rules + crawler (ignore crate, gitignore only inside repos), indexer (rounds, batched texts), search
+crates/dig-cli       `dig index|search|status`
 crates/dig-app       GPUI Shell host: window, `dig` host module; later theme bridge + app socket
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js); gpui-kit.d.ts is generated, not committed
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
@@ -66,7 +70,19 @@ cargo test --release
 `sudo` needs a password in agent sessions: ask the user to install packages. Already on Omarchy: `ffmpeg`,
 `tesseract`, `mpv`, `imv`, `evince`, `gum`, `wtype`, `grim`.
 
+## Ranking (dig-core::ranking)
+
+Query → prompted embed → KNN top 200 (`vec0`, cosine) + FTS5 top 200 over the query's content words (stopwords
+dropped, OR-joined, BM25). Vector hits are gated by z-score within their modality (≥ 1.5, top 3 always kept).
+Reciprocal rank fusion (k = 60); a keyword hit counts by the square of the share of query words it holds; every word
+present adds a small bonus. Then per file: best chunk + half the rest, represented by the best content chunk (not
+the file-name chunk). Snippets open where the rarest query words cluster. Measured on the testbed: every query
+ranks its file first; a search is ~50 ms warm.
+
 ## Things that bit us
+
+- A `.gitignore` in a parent folder (a dotfiles repo in `$HOME` with `*`) would hide everything: the crawler honours
+  gitignore only inside git repositories (`require_git(true)`), and inside those only screenshots are read anyway.
 
 - **gpui-kit through git needs two extra steps**, both documented in `Cargo.toml`: repeat its
   `[patch.crates-io] rquickjs = { git = …gpui-kit, rev = … }` (its workspace patch to `crates/shell/rquickjs-compat`

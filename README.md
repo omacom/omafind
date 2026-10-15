@@ -9,4 +9,6 @@ finds the photo, PDF page, document passage, moment in a recording or video, or 
 scripts/fetch-engine.sh      # llama.cpp's own prebuilt release (Vulkan, 30 MB), no compiling
 scripts/fetch-models.sh      # EmbeddingGemma 2 GGUFs (865 MB) into ~/.local/share/dig/models
 cargo build --release
+./target/release/dig index ~/Pictures ~/Documents
+./target/release/dig search "the clause about pets in the lease"
 ```

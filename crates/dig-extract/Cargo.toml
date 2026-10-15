@@ -1,0 +1,10 @@
+[package]
+name = "dig-extract"
+description = "Per-format readers that turn files into searchable chunks."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dig-core = { path = "../dig-core" }
+anyhow.workspace = true

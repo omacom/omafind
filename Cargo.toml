@@ -1,6 +1,14 @@
 [workspace]
 resolver = "2"
-members = ["crates/dig-core", "crates/dig-embed", "crates/dig-app"]
+members = [
+    "crates/dig-core",
+    "crates/dig-embed",
+    "crates/dig-store",
+    "crates/dig-extract",
+    "crates/dig-index",
+    "crates/dig-cli",
+    "crates/dig-app",
+]
 
 [workspace.package]
 version = "0.0.1"

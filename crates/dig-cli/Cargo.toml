@@ -1,0 +1,19 @@
+[package]
+name = "dig-cli"
+description = "The `dig` command: index folders and search them from the terminal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dig"
+path = "src/main.rs"
+
+[dependencies]
+dig-core = { path = "../dig-core" }
+dig-embed = { path = "../dig-embed" }
+dig-index = { path = "../dig-index" }
+dig-store = { path = "../dig-store" }
+anyhow.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive", "env"] }

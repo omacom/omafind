@@ -1,4 +1,10 @@
-//! Shared types for Dig: prompts, model pins and (later) schema and ranking.
+//! Shared types for Dig: prompts, model pins, paths, the kinds of files and chunks, and ranking.
+
+pub mod paths;
+pub mod ranking;
+pub mod types;
+
+pub use types::*;
 
 /// EmbeddingGemma 2's task prompts (model card). Media inputs take no prompt.
 pub mod prompts {
@@ -31,8 +37,8 @@ pub mod model {
     /// The image and audio encoders (555 MB).
     pub const MEDIA_FILE: &str = "mmproj-embeddinggemma-2-Q8_0.gguf";
     pub const DIM: usize = 768;
-    /// Which vectors the pipeline makes (model files, llama.cpp build, image sizing, prompts). Bumped only when the
-    /// golden-vector test shows a llama.cpp update changed them; every index then embeds again.
+    /// Which vectors the pipeline makes (model files, engine, image sizing, prompts). Bumped only when the golden
+    /// check shows an engine update changed them; every index then embeds again.
     pub const VECTOR_VERSION: u32 = 1;
 
     /// Where the model files live: `$DIG_MODELS`, else `~/.local/share/dig/models`.
@@ -40,10 +46,7 @@ pub mod model {
         if let Some(dir) = std::env::var_os("DIG_MODELS") {
             return dir.into();
         }
-        let data = std::env::var_os("XDG_DATA_HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/share"));
-        data.join("dig/models")
+        super::paths::data_dir().join("models")
     }
 }
 
