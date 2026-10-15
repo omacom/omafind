@@ -160,6 +160,10 @@ pub struct Embedder {
 
 const MAX_SEQUENCES: i32 = 16;
 
+// The llama.cpp handles may move between threads; they are never used from two at once (every caller holds
+// `&mut self`, and the daemon keeps its embedders behind a mutex).
+unsafe impl Send for Embedder {}
+
 impl Embedder {
     pub fn new(models: &Models, options: &Options) -> Result<Self> {
         let started = std::time::Instant::now();

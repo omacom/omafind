@@ -17,6 +17,8 @@ use crate::crawler::{Root, Skipped, crawl};
 pub enum Event {
     /// A root was crawled: how many files it holds, how many are new or changed, what was skipped.
     Crawled { root: PathBuf, files: usize, pending: usize, removed: usize, skipped_secrets: usize, skipped_code_dirs: usize, huge_dirs: Vec<PathBuf> },
+    /// A file is being read now.
+    Reading { path: PathBuf, kind: FileKind },
     /// A file was read and embedded.
     Indexed { path: PathBuf, kind: FileKind, chunks: usize },
     /// A file couldn't be read; it is tried again when it changes.
@@ -29,6 +31,8 @@ pub struct Indexer<'a> {
     pub store: &'a mut Store,
     pub embedder: &'a mut Embedder,
     pub on_event: Box<dyn FnMut(Event) + 'a>,
+    /// Asked before each file: may block while indexing is paused; `false` stops (the rest stays pending).
+    pub gate: Box<dyn FnMut() -> bool + 'a>,
 }
 
 /// How many pending files are taken per round (texts of a round embed in shared batches).
@@ -67,7 +71,13 @@ impl<'a> Indexer<'a> {
             }
             // Read every file of the round first, so their texts can share model batches.
             let mut work: Vec<(dig_store::FileRow, Vec<Chunk>)> = Vec::new();
+            let mut stopped = false;
             for file in files {
+                if !(self.gate)() {
+                    stopped = true;
+                    break;
+                }
+                (self.on_event)(Event::Reading { path: file.path.clone(), kind: file.kind });
                 match dig_extract::extract(&file.path, file.kind) {
                     Ok(chunks) => work.push((file, chunks)),
                     Err(error) => {
@@ -105,7 +115,10 @@ impl<'a> Indexer<'a> {
                 }
             }
             // Media, one at a time (each is its own model run).
-            for (i, (_, chunks)) in work.iter().enumerate() {
+            for (i, (file, chunks)) in work.iter().enumerate() {
+                if chunks.iter().any(|c| matches!(c.embed, Embed::Image { .. } | Embed::Audio { .. })) {
+                    (self.on_event)(Event::Reading { path: file.path.clone(), kind: file.kind });
+                }
                 for (j, chunk) in chunks.iter().enumerate() {
                     let result = match &chunk.embed {
                         Embed::Image { path, budget } => self.embedder.embed_images(&[path.clone()], *budget).map(|mut v| v.remove(0)),
@@ -154,6 +167,9 @@ impl<'a> Indexer<'a> {
                         (self.on_event)(Event::Indexed { path: file.path, kind: file.kind, chunks: n });
                     }
                 }
+            }
+            if stopped {
+                break;
             }
         }
         let _ = std::fs::remove_dir_all(dig_extract::media::scratch_dir());

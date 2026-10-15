@@ -12,7 +12,13 @@ Phases 0–3 are done, 2026-10-14, on this machine (Omarchy, Hyprland 0.56, Rade
 x86-64): engine spikes; images + plain text; PDFs (poppler `pdftotext`, scanned pages rendered with `pdftoppm`),
 screenshots OCR'd with `tesseract`, docx/odt/epub/html read as (zipped) XML, `pandoc` for the rest when installed;
 audio as 30 s windows at a 20 s hop and video as scene-change keyframes plus its soundtrack, all through `ffmpeg`.
-Notes with numbers: `docs/phase-0.md`. Next: Phase 4 (daemon) per `PLAN.md`.
+Phase 4 (daemon) too: `digd` crawls and watches (inotify, 1 s debounce), indexes in a `digd --worker` child that
+lingers 60 s after its queue empties, answers searches over `$XDG_RUNTIME_DIR/dig.sock` with a text-only encoder
+loaded on demand (unloaded after 10 idle minutes, 2 min after the window hides), pauses in power-saver / on battery
+per config (UPower + power-profiles-daemon over D-Bus signals). Measured: a new photo is searchable 2–3 s after it
+lands; the daemon idles at 15 MB RSS without the encoder, ~300 MB with it. The power-saver pause is implemented but
+untested (polkit refuses `powerprofilesctl` from an agent shell). Notes with numbers: `docs/phase-0.md`. Next:
+Phase 5 (the window) per `PLAN.md`.
 
 ## Layout
 
@@ -23,7 +29,11 @@ crates/dig-store     SQLite index: files, chunks, vec0 vectors (cosine), externa
 crates/dig-extract   classify by extension; readers → chunks: name, image, passages, pdf pages (+ rendered scans),
                      OCR text, office/html text, audio windows, video frames (ffmpeg); scratch under ~/.cache/dig
 crates/dig-index     rules + crawler (ignore crate, gitignore only inside repos), indexer (rounds, batched texts), search
-crates/dig-cli       `dig index|search|status`
+crates/dig-client    socket protocol (JSON lines: search, status, pause, resume, reindex, warm, idle, subscribe,
+                     set_roots, shutdown) and the client
+crates/digd          daemon: coordinator (daemon.rs), worker child (worker.rs), watcher, power, searcher, server
+crates/dig-cli       `dig index|search|status|pause|resume|watch` (through digd when it runs, else in-process)
+systemd/digd.service user unit: Nice=10, IOSchedulingClass=idle, CPUWeight=20, MemoryHigh=3G
 crates/dig-app       GPUI Shell host: window, `dig` host module; later theme bridge + app socket
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js); gpui-kit.d.ts is generated, not committed
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
@@ -116,6 +126,16 @@ ranks its file first; a search is ~50 ms warm.
 - `hide` quits for now; a resident hidden window is Phase 5 work (check GPUI Linux `minimize`/unmap at this rev).
 - Theme tokens: `cx.theme().colors.{background,foreground,surface,border,input,muted,muted_foreground,primary,…}`.
 - Set `tracing` filter `dig_app=info,gpui_shell=info,gpui_kit::shell::script=info` to see script errors.
+
+## Running the daemon in isolation (tests)
+
+```bash
+export XDG_RUNTIME_DIR=/tmp/x/run XDG_CONFIG_HOME=/tmp/x/config DIG_INDEX=/tmp/x/index.sqlite
+# /tmp/x/config/dig/config.toml: [index] folders = ["/tmp/x/testbed"]
+./target/release/digd &            # socket at $XDG_RUNTIME_DIR/dig.sock
+./target/release/dig status; ./target/release/dig watch; ./target/release/dig search "…"
+pkill -x digd                      # SIGTERM: quits the worker, removes the socket
+```
 
 ## Driving the UI from an agent shell
 

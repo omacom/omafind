@@ -6,12 +6,11 @@ use std::path::Path;
 
 use dig_core::FileKind;
 
-/// Directory names that are never read, wherever they are.
+/// Directory names that are never read, wherever they are below a root: caches, build output, package trees,
+/// trash. Names people use for real folders (`dev`, `tmp`, `bin`, `out`) are deliberately not here.
 const SKIP_DIRS: &[&str] = &[
-    "node_modules", "bower_components", "target", "build", "dist", "out", "obj", "bin", "__pycache__", ".venv", "venv",
-    "env", ".tox", ".gradle", ".m2", ".mvn", "Pods", "DerivedData", "cache", "Cache", "caches", "Caches", "tmp", "temp",
-    "Trash", "Steam", "steamapps", "lost+found", "proc", "sys", "dev", "run", "snap", "flatpak", "containers", "docker",
-    "iso", "isos", "Isos", "ISOs", "vendor", "third_party", "thirdparty", "extern", "external", "icons", "thumbnails",
+    "node_modules", "bower_components", "target", "build", "dist", "__pycache__", "venv", "Pods", "DerivedData",
+    "cache", "Cache", "caches", "Caches", "Trash", "lost+found", "steamapps", "thumbnails", "Thumbnails", "icons",
 ];
 
 /// Marks of a code project: inside one, only screenshots are read unless the folder is a code root.

@@ -1,5 +1,6 @@
 //! Shared types for Dig: prompts, model pins, paths, the kinds of files and chunks, and ranking.
 
+pub mod config;
 pub mod paths;
 pub mod ranking;
 pub mod types;

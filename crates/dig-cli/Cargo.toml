@@ -14,6 +14,7 @@ dig-core = { path = "../dig-core" }
 dig-embed = { path = "../dig-embed" }
 dig-index = { path = "../dig-index" }
 dig-store = { path = "../dig-store" }
+dig-client = { path = "../dig-client" }
 anyhow.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive", "env"] }

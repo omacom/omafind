@@ -1,0 +1,20 @@
+[Unit]
+Description=Dig: local semantic file search (indexer and search daemon)
+Documentation=https://github.com/tahayvr/dig
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/digd
+Restart=on-failure
+RestartSec=5
+# Indexing is background work: it yields the CPU, the disk and the GPU to whatever the person is doing.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+# The worker child holds the model (~1.5 GB) while it runs; the daemon alone stays small.
+MemoryHigh=3G
+Environment=RUST_BACKTRACE=1
+
+[Install]
+WantedBy=default.target

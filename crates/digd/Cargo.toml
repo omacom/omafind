@@ -1,0 +1,24 @@
+[package]
+name = "digd"
+description = "Dig's daemon: watches the chosen folders, indexes in a worker child, answers searches over a socket."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "digd"
+path = "src/main.rs"
+
+[dependencies]
+dig-core = { path = "../dig-core" }
+dig-embed = { path = "../dig-embed" }
+dig-extract = { path = "../dig-extract" }
+dig-index = { path = "../dig-index" }
+dig-store = { path = "../dig-store" }
+dig-client = { path = "../dig-client" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+notify = "8"
+zbus = "5"
+signal-hook = "0.3"

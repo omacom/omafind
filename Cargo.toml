@@ -6,6 +6,8 @@ members = [
     "crates/dig-store",
     "crates/dig-extract",
     "crates/dig-index",
+    "crates/dig-client",
+    "crates/digd",
     "crates/dig-cli",
     "crates/dig-app",
 ]

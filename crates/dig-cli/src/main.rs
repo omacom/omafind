@@ -2,10 +2,11 @@
 
 use std::io::Write;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use dig_client::{Client, Request};
 use dig_core::FileKind;
 use dig_embed::{Embedder, Models, Options};
 use dig_index::{Event, Indexer, Root, SearchOptions};
@@ -47,11 +48,16 @@ enum Command {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
-    /// What the index holds.
+    /// What the index holds and what the daemon is doing.
     Status {
         #[arg(long)]
         json: bool,
     },
+    /// Stop indexing until `dig resume` (remembered across restarts).
+    Pause,
+    Resume,
+    /// Follow the daemon's progress until indexing is done.
+    Watch,
 }
 
 fn main() -> Result<()> {
@@ -61,7 +67,29 @@ fn main() -> Result<()> {
         Command::Index { folders, code, reset } => index(&index_path, folders, code, reset, cli.cpu),
         Command::Search { query, json, kind, limit } => search(&index_path, &query.join(" "), json, &kind, limit, cli.cpu),
         Command::Status { json } => status(&index_path, json),
+        Command::Pause => Client::connect()?.simple(&Request::Pause).map(|_| println!("paused")),
+        Command::Resume => Client::connect()?.simple(&Request::Resume).map(|_| println!("resumed")),
+        Command::Watch => watch(),
     }
+}
+
+/// Prints the daemon's progress until nothing is pending and no worker runs.
+fn watch() -> Result<()> {
+    let client = Client::connect()?;
+    client.subscribe(|event| {
+        match event {
+            dig_client::Event::Status(s) => {
+                let current = s.current.as_deref().map(|c| format!("  {}", dig_core::paths::tilde(std::path::Path::new(c)))).unwrap_or_default();
+                eprintln!("{:<18} {} indexed, {} pending, {} failed{current}", s.state, s.indexed, s.pending, s.failed);
+                if s.state == "idle" && s.pending == 0 && !s.worker_running {
+                    return false;
+                }
+            }
+            dig_client::Event::Indexed { path, kind } => eprintln!("  {:<10} {}", kind.as_str(), dig_core::paths::tilde(&path)),
+            dig_client::Event::Failed { path, error } => eprintln!("  failed     {}: {error}", dig_core::paths::tilde(&path)),
+        }
+        true
+    })
 }
 
 fn load_embedder(text_only: bool, cpu: bool) -> Result<Embedder> {
@@ -70,9 +98,28 @@ fn load_embedder(text_only: bool, cpu: bool) -> Result<Embedder> {
 }
 
 fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>, reset: bool, cpu: bool) -> Result<()> {
-    let mut store = Store::open(index_path)?;
     let mut roots: Vec<Root> = folders.iter().map(|p| dig_index::indexer::resolve_root(p).map(|path| Root { path, code: false })).collect::<Result<_>>()?;
     roots.extend(code.iter().map(|p| dig_index::indexer::resolve_root(p).map(|path| Root { path, code: true })).collect::<Result<Vec<_>>>()?);
+    // The folders are remembered in the config, which the daemon reads too.
+    if !roots.is_empty() {
+        let mut config = dig_core::config::Config::load().unwrap_or_default();
+        config.set_folders(&roots.iter().filter(|r| !r.code).map(|r| r.path.clone()).collect::<Vec<_>>(), &roots.iter().filter(|r| r.code).map(|r| r.path.clone()).collect::<Vec<_>>());
+        config.save()?;
+    }
+    if Client::is_running() && !reset {
+        let mut client = Client::connect()?;
+        if roots.is_empty() {
+            client.simple(&Request::Reindex)?;
+        } else {
+            client.simple(&Request::SetRoots {
+                folders: roots.iter().filter(|r| !r.code).map(|r| r.path.clone()).collect(),
+                code: roots.iter().filter(|r| r.code).map(|r| r.path.clone()).collect(),
+            })?;
+        }
+        eprintln!("digd is indexing; following its progress (Ctrl-C to stop watching, it keeps going)");
+        return watch();
+    }
+    let mut store = Store::open(index_path)?;
     if roots.is_empty() {
         roots = dig_index::indexer::stored_roots(&store)?;
     }
@@ -101,11 +148,13 @@ fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>
                     for dir in huge_dirs { line += &format!("\n  skipped {} (more than {} entries)", dig_core::paths::tilde(&dir), dig_index::rules::MAX_DIR_ENTRIES); }
                     writeln!(err, "{line}")
                 }
+                Event::Reading { .. } => Ok(()),
                 Event::Indexed { path, kind, chunks } => writeln!(err, "  {:<10} {:>3} chunks  {}", kind.as_str(), chunks, dig_core::paths::tilde(&path)),
                 Event::Failed { path, error } => writeln!(err, "  failed            {}: {error}", dig_core::paths::tilde(&path)),
                 Event::Done { indexed, failed, seconds } => writeln!(err, "{indexed} files indexed, {failed} failed, {:.1} s", seconds),
             };
         }),
+        gate: Box::new(|| true),
     };
     indexer.run(&roots)?;
     eprintln!("done in {:.1} s", started.elapsed().as_secs_f64());
@@ -113,15 +162,21 @@ fn index(index_path: &std::path::Path, folders: Vec<PathBuf>, code: Vec<PathBuf>
 }
 
 fn search(index_path: &std::path::Path, query: &str, json: bool, kinds: &[String], limit: usize, cpu: bool) -> Result<()> {
-    anyhow::ensure!(index_path.exists(), "no index yet: run `dig index <folders>` first");
-    let store = Store::open(index_path)?;
     let kinds: Vec<FileKind> = kinds.iter().map(|k| FileKind::parse(k).with_context(|| format!("unknown kind {k}"))).collect::<Result<_>>()?;
-    let t0 = Instant::now();
-    let mut embedder = load_embedder(true, cpu)?;
-    let loaded = t0.elapsed();
-    let t1 = Instant::now();
-    let hits = dig_index::search(&store, &mut embedder, query, &SearchOptions { limit, kinds, candidates: 200 })?;
-    let searched = t1.elapsed();
+    let (hits, loaded, searched) = if Client::is_running() {
+        let t = Instant::now();
+        let (hits, took_ms) = Client::connect()?.search(query, limit, kinds)?;
+        (hits, Duration::ZERO, Duration::from_secs_f64((took_ms / 1000.0).max(0.0)).min(t.elapsed()))
+    } else {
+        anyhow::ensure!(index_path.exists(), "no index yet: run `dig index <folders>` first");
+        let store = Store::open(index_path)?;
+        let t0 = Instant::now();
+        let mut embedder = load_embedder(true, cpu)?;
+        let loaded = t0.elapsed();
+        let t1 = Instant::now();
+        let hits = dig_index::search(&store, &mut embedder, query, &SearchOptions { limit, kinds, candidates: 200 })?;
+        (hits, loaded, t1.elapsed())
+    };
     if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
         return Ok(());
@@ -138,11 +193,30 @@ fn search(index_path: &std::path::Path, query: &str, json: bool, kinds: &[String
             println!("    {}", hit.snippet);
         }
     }
-    eprintln!("({} results; model {:.2} s, search {:.0} ms)", hits.len(), loaded.as_secs_f64(), searched.as_secs_f64() * 1000.0);
+    if loaded.is_zero() {
+        eprintln!("({} results via digd, {:.0} ms)", hits.len(), searched.as_secs_f64() * 1000.0);
+    } else {
+        eprintln!("({} results; model {:.2} s, search {:.0} ms)", hits.len(), loaded.as_secs_f64(), searched.as_secs_f64() * 1000.0);
+    }
     Ok(())
 }
 
 fn status(index_path: &std::path::Path, json: bool) -> Result<()> {
+    if Client::is_running() {
+        let status = Client::connect()?.status()?;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&status)?);
+            return Ok(());
+        }
+        println!("digd {}: {}{}", status.version, status.state, status.current.as_deref().map(|c| format!(" ({})", dig_core::paths::tilde(std::path::Path::new(c)))).unwrap_or_default());
+        for root in &status.roots {
+            println!("root:  {}{}", dig_core::paths::tilde(&root.path), if root.code { " (code)" } else { "" });
+        }
+        println!("files: {} ({} indexed, {} pending, {} failed); {} chunks", status.files, status.indexed, status.pending, status.failed, status.chunks);
+        println!("power: {}{}; query encoder {}; worker {}", if status.on_battery { "battery" } else { "AC" }, if status.power_saver { ", power-saver" } else { "" }, if status.query_encoder_loaded { "loaded" } else { "unloaded" }, if status.worker_running { "running" } else { "idle" });
+        println!("engine: llama.cpp {}, vectors {}", status.llama_version, status.vector_version);
+        return Ok(());
+    }
     anyhow::ensure!(index_path.exists(), "no index yet: run `dig index <folders>` first");
     let store = Store::open(index_path)?;
     let stats = store.stats()?;
