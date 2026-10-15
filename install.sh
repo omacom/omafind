@@ -9,9 +9,11 @@ bin="${XDG_BIN_HOME:-$HOME/.local/bin}"
 share="${XDG_DATA_HOME:-$HOME/.local/share}/omafind"
 
 scripts/fetch-engine.sh
-cargo build --release
+cargo build --profile dist
 mkdir -p "$bin" "$share/ui"
-install -m755 target/release/omafind target/release/omafindd target/release/omafind-app "$bin/"
+# The dist profile (Cargo.toml): LTO, stripped, third-party code built for size. The release profile keeps debug info
+# for profiling, nine tenths of each binary; it isn't what gets installed.
+install -m755 target/dist/omafind target/dist/omafindd target/dist/omafind-app "$bin/"
 cp ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js "$share/ui/"
 mkdir -p "$HOME/.local/share/applications"
 install -m644 packaging/omafind.desktop "$HOME/.local/share/applications/omafind.desktop"

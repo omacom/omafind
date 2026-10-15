@@ -116,6 +116,11 @@ cargo run -p omafind-app -- --dev      # hot-reloads ui/ on save, writes ui/gpui
 cargo nextest run --release   # or `just test`; nextest skips doctests: cargo test --doc
 ```
 
+Installs and the package build with `--profile dist` (Cargo.toml): fat LTO, one codegen unit, stripped, third-party
+crates at `opt-level = "z"` except the hot ones (QuickJS, GPUI's renderer, SQLite, image decoders); our crates stay at
+3. omafind-app goes from 80 MB (release, stripped) to about 45 MB. It takes ~10 minutes, so it isn't the everyday build;
+compare `omafind bench` between the two after touching it.
+
 `sudo` needs a password in agent sessions: ask the user to install packages. Already on Omarchy: `ffmpeg`,
 `tesseract`, `mpv`, `imv`, `evince`, `gum`, `wtype`, `grim`.
 

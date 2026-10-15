@@ -36,7 +36,7 @@ build() {
   cd "$pkgname-$pkgver"
   export OMAFIND_LLAMA_DIR="$srcdir/engine" OMAFIND_LLAMA_RPATH=/usr/lib/omafind/engine
   export CARGO_TARGET_DIR=target
-  cargo build --release --frozen
+  cargo build --profile dist --frozen
 }
 
 check() {
@@ -47,7 +47,7 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 target/release/omafind target/release/omafindd target/release/omafind-app -t "$pkgdir/usr/bin/"
+  install -Dm755 target/dist/omafind target/dist/omafindd target/dist/omafind-app -t "$pkgdir/usr/bin/"
   install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js -t "$pkgdir/usr/share/omafind/ui/"
   install -Dm644 packaging/omafind.lua -t "$pkgdir/usr/share/omafind/hypr/"
   install -Dm644 systemd/omafindd.service -t "$pkgdir/usr/lib/systemd/user/"
