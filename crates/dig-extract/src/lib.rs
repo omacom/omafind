@@ -5,6 +5,10 @@
 //! audio, video and code; each is one more `match` arm here.
 
 pub mod classify;
+pub mod media;
+pub mod ocr;
+pub mod office;
+pub mod pdf;
 pub mod text;
 
 use std::path::{Path, PathBuf};
@@ -55,7 +59,7 @@ pub const FRAME_BUDGET: usize = 70;
 
 /// Whether this build reads files of `kind` (later phases add the rest).
 pub fn supported(kind: FileKind) -> bool {
-    matches!(kind, FileKind::Screenshot | FileKind::Image | FileKind::Doc)
+    matches!(kind, FileKind::Screenshot | FileKind::Image | FileKind::Doc | FileKind::Pdf | FileKind::Audio | FileKind::Video)
 }
 
 /// The chunks of `path`, which `classify` said is a `kind`. The file name chunk comes first so a file is always
@@ -63,13 +67,21 @@ pub fn supported(kind: FileKind) -> bool {
 pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
     let mut chunks = vec![name_chunk(path)];
     match kind {
-        FileKind::Screenshot => chunks.push(Chunk {
-            kind: ChunkKind::Image,
-            locator: None,
-            locator_end: None,
-            text: String::new(),
-            embed: Embed::Image { path: path.to_path_buf(), budget: SCREENSHOT_BUDGET },
-        }),
+        FileKind::Screenshot => {
+            chunks.push(Chunk {
+                kind: ChunkKind::Image,
+                locator: None,
+                locator_end: None,
+                text: String::new(),
+                embed: Embed::Image { path: path.to_path_buf(), budget: SCREENSHOT_BUDGET },
+            });
+            // Whatever text is on it, for keyword search: an error message is found by its exact words.
+            if let Ok(text) = ocr::read(path) {
+                if !text.is_empty() {
+                    chunks.push(Chunk { kind: ChunkKind::Ocr, locator: Some(0.0), locator_end: None, text, embed: Embed::None });
+                }
+            }
+        }
         FileKind::Image => chunks.push(Chunk {
             kind: ChunkKind::Image,
             locator: None,
@@ -79,12 +91,17 @@ pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
         }),
         FileKind::Doc => {
             let ext = classify::extension(path);
-            anyhow::ensure!(classify::PLAIN_TEXT.contains(&ext.as_str()), ".{ext} documents aren't read yet");
-            chunks.extend(text::extract(path)?)
+            if classify::PLAIN_TEXT.contains(&ext.as_str()) && ext != "html" && ext != "htm" {
+                chunks.extend(text::extract(path)?)
+            } else {
+                let body = office::read(path, &ext)?;
+                chunks.extend(text::passages_of(path, &body))
+            }
         }
-        FileKind::Pdf | FileKind::Audio | FileKind::Video | FileKind::Code => {
-            anyhow::bail!("{} files aren't read yet", kind.as_str())
-        }
+        FileKind::Pdf => chunks.extend(pdf::extract(path)?),
+        FileKind::Audio => chunks.extend(media::extract_audio(path)?),
+        FileKind::Video => chunks.extend(media::extract_video(path)?),
+        FileKind::Code => anyhow::bail!("code files aren't read yet"),
     }
     Ok(chunks)
 }

@@ -121,6 +121,8 @@ impl<'a> Indexer<'a> {
                     }
                 }
             }
+            // Audio windows and frames of this round are no longer needed once written below.
+            let scratch = dig_extract::media::scratch_dir();
             // Write each file: a chunk whose embedding failed is kept for keywords; a file whose only content
             // chunk failed is marked failed so the error is visible.
             for (i, (file, chunks)) in work.into_iter().enumerate() {
@@ -138,6 +140,7 @@ impl<'a> Indexer<'a> {
                     let modality = if vector.is_some() { chunk.modality() } else { dig_core::Modality::None };
                     rows.push(NewChunk { kind: chunk.kind, modality, locator: chunk.locator, locator_end: chunk.locator_end, text: chunk.text, vector });
                 }
+                let _ = &scratch;
                 match (content_ok, content_failed) {
                     (false, Some(error)) => {
                         self.store.mark_failed(file.id, &error)?;
@@ -153,6 +156,7 @@ impl<'a> Indexer<'a> {
                 }
             }
         }
+        let _ = std::fs::remove_dir_all(dig_extract::media::scratch_dir());
         (self.on_event)(Event::Done { indexed, failed, seconds: started.elapsed().as_secs_f64() });
         Ok(())
     }

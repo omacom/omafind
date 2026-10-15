@@ -8,9 +8,11 @@ or video, or code. The phase-by-phase brief is `PLAN.md` (kept out of git by `.g
 
 ## Status
 
-Phase 0 (spikes) and Phase 1 (images + plain text, CLI only) are done, 2026-10-14, on this machine (Omarchy,
-Hyprland 0.56, Radeon RX 480 on RADV, 8-thread x86-64). Notes with numbers: `docs/phase-0.md`. Next: Phase 2
-(PDFs via poppler's `pdftotext`/`pdftoppm`, OCR via `tesseract`, docx/odt read as zipped XML) per `PLAN.md`.
+Phases 0–3 are done, 2026-10-14, on this machine (Omarchy, Hyprland 0.56, Radeon RX 480 on RADV, 8-thread
+x86-64): engine spikes; images + plain text; PDFs (poppler `pdftotext`, scanned pages rendered with `pdftoppm`),
+screenshots OCR'd with `tesseract`, docx/odt/epub/html read as (zipped) XML, `pandoc` for the rest when installed;
+audio as 30 s windows at a 20 s hop and video as scene-change keyframes plus its soundtrack, all through `ffmpeg`.
+Notes with numbers: `docs/phase-0.md`. Next: Phase 4 (daemon) per `PLAN.md`.
 
 ## Layout
 
@@ -18,7 +20,8 @@ Hyprland 0.56, Radeon RX 480 on RADV, 8-thread x86-64). Notes with numbers: `doc
 crates/dig-core      prompts, model pins, VECTOR_VERSION; later schema + ranking
 crates/dig-embed     bindgen over the engine's llama.h/mtmd.h, image sizing, Embedder, `embed-spike` binary
 crates/dig-store     SQLite index: files, chunks, vec0 vectors (cosine), external-content FTS5, roots, meta
-crates/dig-extract   classify by extension; readers → chunks (name, image, passages; later pages, OCR, audio, frames)
+crates/dig-extract   classify by extension; readers → chunks: name, image, passages, pdf pages (+ rendered scans),
+                     OCR text, office/html text, audio windows, video frames (ffmpeg); scratch under ~/.cache/dig
 crates/dig-index     rules + crawler (ignore crate, gitignore only inside repos), indexer (rounds, batched texts), search
 crates/dig-cli       `dig index|search|status`
 crates/dig-app       GPUI Shell host: window, `dig` host module; later theme bridge + app socket

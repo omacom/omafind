@@ -17,15 +17,20 @@ pub const MAX_PASSAGES: usize = 400;
 pub fn extract(path: &Path) -> Result<Vec<Chunk>> {
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let text = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_BYTES as usize)]);
+    Ok(passages_of(path, &text))
+}
+
+/// `text` (already read from `path`) as passage chunks, the file's stem as the document title.
+pub fn passages_of(path: &Path, text: &str) -> Vec<Chunk> {
     let title = path.file_stem().and_then(|s| s.to_str()).map(|s| s.replace(['_', '-'], " "));
-    Ok(passages(&text)
+    passages(text)
         .into_iter()
         .take(MAX_PASSAGES)
         .map(|(offset, body)| {
             let embed = if mostly_numeric(&body) { Embed::None } else { Embed::Text(prompts::document(title.as_deref(), &body)) };
             Chunk { kind: ChunkKind::Passage, locator: Some(offset as f64), locator_end: Some((offset + body.chars().count()) as f64), text: body, embed }
         })
-        .collect())
+        .collect()
 }
 
 /// Passages as (character offset, text). Breaks fall at blank lines when one is near the target length, else at a
