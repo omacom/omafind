@@ -10,7 +10,7 @@ url="https://github.com/omacom/omafind"
 license=(MIT)
 _llama=b11635
 depends=(gcc-libs glibc vulkan-icd-loader ffmpeg ffmpegthumbnailer poppler tesseract tesseract-data-eng wl-clipboard libxkbcommon)
-optdepends=('pandoc-cli: .doc and .rtf documents' 'mpv: open recordings at a moment' 'evince: open PDFs at a page' 'imv: open photos' 'gum: prompts in omafind setup')
+optdepends=('pandoc-cli: .doc and .rtf documents' 'mpv: open recordings at a moment' 'evince: open PDFs at a page' 'imv: open photos')
 makedepends=(cargo clang)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "llama-$_llama-src.tar.gz::https://github.com/ggml-org/llama.cpp/archive/refs/tags/$_llama.tar.gz")

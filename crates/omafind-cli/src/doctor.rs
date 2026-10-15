@@ -87,7 +87,6 @@ pub fn run(json: bool) -> Result<bool> {
         ("evince", "evince", "opening PDFs at a page"),
         ("imv", "imv", "opening photos"),
         ("wl-copy", "wl-clipboard", "copying files"),
-        ("gum", "gum", "omafind setup prompts"),
     ] {
         checks.push(Check {
             ok: have(cmd),
@@ -223,22 +222,24 @@ pub fn run(json: bool) -> Result<bool> {
             )?
         );
     } else {
+        cliclack::intro("Omafind doctor")?;
         for c in &checks {
-            println!(
-                "{} {:<44} {}",
-                if c.ok { "✓" } else { "✗" },
-                c.what,
-                c.detail
-            );
-        }
-        println!(
-            "{}",
-            if all_ok {
-                "everything looks fine"
+            let line = format!("{}\n{}", c.what, c.detail);
+            if c.ok {
+                cliclack::log::success(line)?;
             } else {
-                "some checks failed"
+                cliclack::log::error(line)?;
             }
-        );
+        }
+        if all_ok {
+            cliclack::outro("Everything looks fine")?;
+        } else {
+            let failed = checks.iter().filter(|c| !c.ok).count();
+            cliclack::outro_cancel(format!(
+                "{failed} {} need attention",
+                if failed == 1 { "check" } else { "checks" }
+            ))?;
+        }
     }
     Ok(all_ok)
 }

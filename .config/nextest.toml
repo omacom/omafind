@@ -1,0 +1,12 @@
+# cargo nextest: `just test`, or `just test ci` for every failure at once and a JUnit report in target/nextest/ci.
+
+[profile.default]
+# Anything slower than this is worth knowing about: every test here runs in milliseconds.
+slow-timeout = { period = "10s", terminate-after = 6 }
+
+[profile.ci]
+fail-fast = false
+failure-output = "final"
+
+[profile.ci.junit]
+path = "junit.xml"

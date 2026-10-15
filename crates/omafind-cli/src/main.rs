@@ -4,8 +4,9 @@ mod bench;
 mod doctor;
 mod eval;
 mod setup;
+mod ui;
 
-use std::io::Write;
+use std::io::IsTerminal;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -258,38 +259,95 @@ fn toggle() -> Result<()> {
 /// Prints the daemon's progress until nothing is pending and no worker runs.
 fn watch() -> Result<()> {
     let client = Client::connect()?;
+    if !std::io::stderr().is_terminal() {
+        return client.subscribe(|event| {
+            match event {
+                omafind_client::Event::Status(s) => {
+                    let current = s
+                        .current
+                        .as_deref()
+                        .map(|c| {
+                            format!("  {}", omafind_core::paths::tilde(std::path::Path::new(c)))
+                        })
+                        .unwrap_or_default();
+                    eprintln!(
+                        "{:<18} {} indexed, {} pending, {} failed{current}",
+                        s.state, s.indexed, s.pending, s.failed
+                    );
+                    if finished(&s) {
+                        return false;
+                    }
+                }
+                omafind_client::Event::Indexed { path, kind } => {
+                    eprintln!(
+                        "  {:<10} {}",
+                        kind.as_str(),
+                        omafind_core::paths::tilde(&path)
+                    )
+                }
+                omafind_client::Event::Failed { path, error } => {
+                    eprintln!(
+                        "  failed     {}: {error}",
+                        omafind_core::paths::tilde(&path)
+                    )
+                }
+            }
+            true
+        });
+    }
+    // On a terminal: one bar over every file, the one being read as its message.
+    let bar = cliclack::progress_bar(1);
+    let mut started = false;
+    let mut failures: Vec<(PathBuf, String)> = Vec::new();
     client.subscribe(|event| {
         match event {
             omafind_client::Event::Status(s) => {
-                let current = s
-                    .current
-                    .as_deref()
-                    .map(|c| format!("  {}", omafind_core::paths::tilde(std::path::Path::new(c))))
-                    .unwrap_or_default();
-                eprintln!(
-                    "{:<18} {} indexed, {} pending, {} failed{current}",
-                    s.state, s.indexed, s.pending, s.failed
-                );
-                if s.state == "idle" && s.pending == 0 && !s.worker_running {
+                let done = (s.indexed + s.failed) as u64;
+                bar.set_length((s.files as u64).max(1));
+                bar.set_position(done);
+                let message = match s.current.as_deref() {
+                    Some(c) => format!(
+                        "{} · {}",
+                        s.state,
+                        omafind_core::paths::tilde(std::path::Path::new(c))
+                    ),
+                    None => s.state.clone(),
+                };
+                if !started {
+                    bar.start(&message);
+                    started = true;
+                } else {
+                    bar.set_message(&message);
+                }
+                if finished(&s) {
+                    bar.stop(format!("{} files indexed, {} failed", s.indexed, s.failed));
                     return false;
                 }
             }
-            omafind_client::Event::Indexed { path, kind } => {
-                eprintln!(
-                    "  {:<10} {}",
-                    kind.as_str(),
-                    omafind_core::paths::tilde(&path)
-                )
-            }
-            omafind_client::Event::Failed { path, error } => {
-                eprintln!(
-                    "  failed     {}: {error}",
-                    omafind_core::paths::tilde(&path)
-                )
-            }
+            omafind_client::Event::Indexed { .. } => {}
+            omafind_client::Event::Failed { path, error } => failures.push((path, error)),
         }
         true
-    })
+    })?;
+    report_failures(&failures)
+}
+
+fn finished(s: &omafind_client::Status) -> bool {
+    s.state == "idle" && s.pending == 0 && !s.worker_running
+}
+
+/// Files that couldn't be read, after a progress bar: the first few, and where to find the rest.
+fn report_failures(failures: &[(PathBuf, String)]) -> Result<()> {
+    for (path, error) in failures.iter().take(8) {
+        cliclack::log::warning(format!("{}\n{error}", omafind_core::paths::tilde(path)))?;
+    }
+    if failures.len() > 8 {
+        cliclack::log::remark(format!(
+            "{} more: omafind status --failed",
+            failures.len() - 8
+        ))?;
+    }
+    Ok(())
 }
 
 fn load_embedder(text_only: bool, cpu: bool) -> Result<Embedder> {
@@ -396,63 +454,78 @@ fn index(
             "CPU"
         }
     );
-    let on_event = |event: Event| {
-        let mut err = std::io::stderr().lock();
-        let _ = match event {
-            Event::Crawled {
-                root,
-                files,
-                pending,
-                removed,
-                skipped_secrets,
-                skipped_code_dirs,
-                huge_dirs,
-            } => {
-                let mut line = format!(
-                    "{}: {files} files, {pending} to index",
-                    omafind_core::paths::tilde(&root)
-                );
-                if removed > 0 {
-                    line += &format!(", {removed} gone");
-                }
-                if skipped_secrets > 0 {
-                    line += &format!(", {skipped_secrets} secrets skipped");
-                }
-                if skipped_code_dirs > 0 {
-                    line += &format!(", {skipped_code_dirs} code projects (screenshots only)");
-                }
-                for dir in huge_dirs {
-                    line += &format!(
-                        "\n  skipped {} (more than {} entries)",
-                        omafind_core::paths::tilde(&dir),
-                        omafind_index::rules::MAX_DIR_ENTRIES
-                    );
-                }
-                writeln!(err, "{line}")
+    // One bar per run over the files the crawl found pending; what the crawl found, and failures, around it.
+    let bar = std::cell::RefCell::new(None::<cliclack::ProgressBar>);
+    let pending = std::cell::Cell::new(0u64);
+    let failures = std::cell::RefCell::new(Vec::<(PathBuf, String)>::new());
+    let on_event = |event: Event| match event {
+        Event::Crawled {
+            root,
+            files,
+            pending: new,
+            removed,
+            skipped_secrets,
+            skipped_code_dirs,
+            huge_dirs,
+        } => {
+            pending.set(pending.get() + new as u64);
+            let mut line = format!(
+                "{}: {files} files, {new} to index",
+                omafind_core::paths::tilde(&root)
+            );
+            if removed > 0 {
+                line += &format!(", {removed} gone");
             }
-            Event::Reading { .. } => Ok(()),
-            Event::Indexed { path, kind, chunks } => writeln!(
-                err,
-                "  {:<10} {:>3} chunks  {}",
-                kind.as_str(),
-                chunks,
-                omafind_core::paths::tilde(&path)
-            ),
-            Event::Failed { path, error } => writeln!(
-                err,
-                "  failed            {}: {error}",
-                omafind_core::paths::tilde(&path)
-            ),
-            Event::Done {
-                indexed,
-                failed,
-                seconds,
-            } => writeln!(
-                err,
-                "{indexed} files indexed, {failed} failed, {:.1} s",
-                seconds
-            ),
-        };
+            if skipped_secrets > 0 {
+                line += &format!(", {skipped_secrets} secrets skipped");
+            }
+            if skipped_code_dirs > 0 {
+                line += &format!(", {skipped_code_dirs} code projects (screenshots only)");
+            }
+            for dir in huge_dirs {
+                line += &format!(
+                    "\nskipped {} (more than {} entries)",
+                    omafind_core::paths::tilde(&dir),
+                    omafind_index::rules::MAX_DIR_ENTRIES
+                );
+            }
+            let _ = cliclack::log::step(line);
+        }
+        Event::Reading { path, .. } => {
+            let mut bar = bar.borrow_mut();
+            let bar = bar.get_or_insert_with(|| {
+                let b = cliclack::progress_bar(pending.get().max(1));
+                b.start("Reading");
+                b
+            });
+            bar.set_message(omafind_core::paths::tilde(&path));
+        }
+        Event::Indexed { .. } => {
+            if let Some(bar) = bar.borrow().as_ref() {
+                bar.inc(1);
+            }
+        }
+        Event::Failed { path, error } => {
+            if let Some(bar) = bar.borrow().as_ref() {
+                bar.inc(1);
+            }
+            failures.borrow_mut().push((path, error));
+        }
+        Event::Done {
+            indexed,
+            failed,
+            seconds,
+        } => {
+            let line = format!("{indexed} files indexed, {failed} failed, {seconds:.1} s");
+            match bar.borrow_mut().take() {
+                Some(bar) => bar.stop(line),
+                None => {
+                    let _ = cliclack::log::success(line);
+                }
+            }
+            pending.set(0);
+            let _ = report_failures(&failures.borrow_mut().drain(..).collect::<Vec<_>>());
+        }
     };
     let (files, code): (Vec<Root>, Vec<Root>) = roots.into_iter().partition(|r| !r.code);
     if !files.is_empty() {

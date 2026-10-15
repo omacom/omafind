@@ -1,4 +1,6 @@
 # Omafind's everyday commands. `just` lists them.
+alias c := check
+alias t := test
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -50,8 +52,10 @@ fmt:
 lint:
     cargo clippy --release --workspace --all-targets -- -D warnings
 
-test:
-    cargo test --release
+# Tests with cargo-nextest (`just test ci`: no fail-fast, JUnit report), then doctests, which nextest doesn't run
+test profile="default":
+    cargo nextest run --release --workspace --profile {{ profile }} --show-progress only
+    cargo test --release --workspace --doc
 
 # What CI would run: formatting, lints, tests
 check:

@@ -76,6 +76,8 @@ fn build(path: &Path, chunks: usize) -> Result<()> {
         FileKind::Video,
     ];
     let files = chunks / CHUNKS_PER_FILE;
+    let bar = cliclack::progress_bar(files as u64);
+    bar.start(format!("Building a {chunks}-chunk index"));
     let t = Instant::now();
     let now = 1_790_000_000i64;
     let mut batch: Vec<(i64, Vec<NewChunk>)> = Vec::new();
@@ -144,12 +146,7 @@ fn build(path: &Path, chunks: usize) -> Result<()> {
                     .collect::<Vec<_>>(),
             )?;
             batch.clear();
-            eprint!(
-                "\r  building {}/{} files ({:.0} s)",
-                f + 1,
-                files,
-                t.elapsed().as_secs_f64()
-            );
+            bar.set_position((f + 1) as u64);
         }
     }
     store.set_meta("bench_words", &words[..50].join(" "))?;
@@ -157,10 +154,10 @@ fn build(path: &Path, chunks: usize) -> Result<()> {
     std::fs::rename(&tmp, path)?;
     let _ = std::fs::remove_file(tmp.with_extension("building-wal"));
     let _ = std::fs::remove_file(tmp.with_extension("building-shm"));
-    eprintln!(
-        "\r  built {chunks} chunks in {:.0} s                ",
+    bar.stop(format!(
+        "Built {chunks} chunks in {:.0} s",
         t.elapsed().as_secs_f64()
-    );
+    ));
     Ok(())
 }
 

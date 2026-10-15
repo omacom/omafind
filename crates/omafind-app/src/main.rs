@@ -486,21 +486,28 @@ fn omafind_module(shared: Shared) -> HostModule {
                                 "image and audio encoders"
                             };
                             let shared2 = shared.clone();
-                            let outcome = omafind_setup::download::fetch_with(
-                                &models,
-                                file,
-                                &mut |done, total| {
-                                    shared2.lock().unwrap().setup_progress = Some((
-                                        format!(
-                                            "Downloading the {name} ({} of {} MB)",
-                                            done / 1_000_000,
-                                            total / 1_000_000
+                            let outcome =
+                                omafind_setup::download::fetch_with(&models, file, &mut |step| {
+                                    use omafind_setup::download::Progress;
+                                    shared2.lock().unwrap().setup_progress = Some(match step {
+                                        Progress::Copying => (
+                                            format!(
+                                                "Copying the {name} from the Hugging Face cache"
+                                            ),
+                                            0.0,
                                         ),
-                                        done as f64 / total.max(1) as f64,
-                                    ));
+                                        Progress::Downloading { done, total } => (
+                                            format!(
+                                                "Downloading the {name} ({} of {} MB)",
+                                                done / 1_000_000,
+                                                total / 1_000_000
+                                            ),
+                                            done as f64 / total.max(1) as f64,
+                                        ),
+                                        Progress::Checking => (format!("Checking the {name}"), 1.0),
+                                    });
                                     note(Note::Refresh);
-                                },
-                            );
+                                });
                             shared.lock().unwrap().setup_progress = None;
                             note(Note::Refresh);
                             outcome?;

@@ -1,12 +1,18 @@
-//! `omafind setup`: models, folders, the daemon, the window, the key. Each step asks (with `gum`) unless `--yes`.
+//! `omafind setup`: models, folders, the daemon, the window, the key. Each step asks unless `--yes` (or there is no
+//! terminal to ask on), and `--dry-run` asks but changes nothing.
 
 use std::path::PathBuf;
 use std::process::Command;
 
 use anyhow::{Context, Result};
 use omafind_core::config::Config;
+use omafind_core::paths::tilde;
 
 use omafind_setup::{download, hypr};
+
+use crate::ui;
+
+const WHAT: &str = "Setup";
 
 pub struct Options {
     pub yes: bool,
@@ -16,64 +22,54 @@ pub struct Options {
     pub text_only: bool,
 }
 
-fn have(cmd: &str) -> bool {
-    Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+/// Fetches one model file with a progress bar, then a spinner while its checksum is checked.
+fn fetch(models: &std::path::Path, file: &download::ModelFile) -> Result<()> {
+    let bar = cliclack::progress_bar(file.bytes).with_download_template();
+    bar.start(file.name);
+    let check = cliclack::spinner();
+    let result = download::fetch_with(models, file, &mut |step| match step {
+        download::Progress::Copying => {
+            bar.set_message(format!("{} (from the Hugging Face cache)", file.name))
+        }
+        download::Progress::Downloading { done, .. } => bar.set_position(done),
+        download::Progress::Checking => {
+            bar.stop(format!("{} downloaded", file.name));
+            check.start(format!("Checking {}", file.name));
+        }
+    });
+    match &result {
+        Ok(()) => check.stop(format!("{} ({} MB)", file.name, file.bytes / 1_000_000)),
+        Err(error) => {
+            bar.error(format!("{}: {error:#}", file.name));
+            check.error(format!("{}: {error:#}", file.name));
+        }
+    }
+    result
 }
 
-/// Yes/no: `gum confirm`, else stdin.
-fn confirm(question: &str, yes: bool) -> bool {
-    if yes {
-        eprintln!("{question} yes");
-        return true;
-    }
-    if have("gum") {
-        return Command::new("gum")
-            .args(["confirm", "--default=yes", question])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-    }
-    eprint!("{question} [Y/n] ");
-    let mut line = String::new();
-    std::io::stdin().read_line(&mut line).ok();
-    !line.trim().to_lowercase().starts_with('n')
-}
-
-/// A multi-choice: `gum choose --no-limit`, else all preselected.
-fn choose(header: &str, items: &[(String, bool)], yes: bool) -> Vec<String> {
-    if yes || !have("gum") {
-        return items
-            .iter()
-            .filter(|(_, on)| *on)
-            .map(|(label, _)| label.clone())
-            .collect();
-    }
-    let selected: Vec<&str> = items
+/// (path, label, hint) rows for a folder picker, and the ones to preselect.
+fn folder_items(
+    candidates: &[(omafind_index::survey::Survey, bool)],
+) -> (Vec<(PathBuf, String, String)>, Vec<PathBuf>) {
+    let items = candidates
+        .iter()
+        .map(|(s, _)| (s.path.clone(), tilde(&s.path), s.summary()))
+        .collect();
+    let on = candidates
         .iter()
         .filter(|(_, on)| *on)
-        .map(|(l, _)| l.as_str())
+        .map(|(s, _)| s.path.clone())
         .collect();
-    let output = Command::new("gum")
-        .args(["choose", "--no-limit", "--header", header])
-        .args(selected.iter().flat_map(|s| ["--selected", s]))
-        .args(items.iter().map(|(l, _)| l.as_str()))
-        .output();
-    match output {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
-            .lines()
-            .map(str::to_owned)
-            .collect(),
-        _ => Vec::new(),
-    }
+    (items, on)
 }
 
 pub fn run(options: Options) -> Result<()> {
     let dry = options.dry_run;
-    eprintln!("Omafind setup");
+    cliclack::intro(if dry {
+        "Omafind setup (dry run)"
+    } else {
+        "Omafind setup"
+    })?;
 
     // 1. Models.
     let models = omafind_core::model::dir();
@@ -82,27 +78,21 @@ pub fn run(options: Options) -> Result<()> {
     } else {
         vec![&download::TEXT, &download::MEDIA]
     };
-    let missing: Vec<&&download::ModelFile> = wanted
-        .iter()
+    let missing: Vec<&download::ModelFile> = wanted
+        .into_iter()
         .filter(|f| !download::present(&models, f))
         .collect();
     if missing.is_empty() {
-        eprintln!(
-            "• model files present in {}",
-            omafind_core::paths::tilde(&models)
-        );
+        cliclack::log::success(format!("Model files are in {}", tilde(&models)))?;
     } else {
         let mb: u64 = missing.iter().map(|f| f.bytes).sum::<u64>() / 1_000_000;
-        if confirm(
-            &format!(
-                "Download the EmbeddingGemma 2 model files ({mb} MB) into {}?",
-                omafind_core::paths::tilde(&models)
-            ),
-            options.yes,
-        ) && !dry
-        {
+        let question = format!(
+            "Download the EmbeddingGemma 2 model files ({mb} MB) into {}?",
+            tilde(&models)
+        );
+        if ui::confirm(question, options.yes, WHAT)? && !dry {
             for file in &missing {
-                download::fetch(&models, file)?;
+                fetch(&models, file)?;
             }
         }
     }
@@ -116,35 +106,18 @@ pub fn run(options: Options) -> Result<()> {
             .map(|p| omafind_index::indexer::resolve_root(p))
             .collect::<Result<_>>()?
     } else {
-        eprintln!("• looking at your folders…");
+        let looking = cliclack::spinner();
+        looking.start("Looking at your folders");
         let candidates = omafind_setup::candidate_folders(&config);
-        let labelled: Vec<(String, bool)> = candidates
-            .iter()
-            .map(|(s, on)| {
-                (
-                    format!(
-                        "{:<14} {}",
-                        omafind_core::paths::tilde(&s.path),
-                        s.summary()
-                    ),
-                    *on,
-                )
-            })
-            .collect();
-        let chosen = choose(
-            "Which folders should Omafind index? (space to toggle, enter to confirm)",
-            &labelled,
+        looking.stop(format!("{} folders worth indexing", candidates.len()));
+        let (items, on) = folder_items(&candidates);
+        ui::choose(
+            "Which folders should Omafind index?",
+            &items,
+            on,
             options.yes,
-        );
-        candidates
-            .into_iter()
-            .map(|(s, _)| s.path)
-            .filter(|p| {
-                chosen
-                    .iter()
-                    .any(|c| c.starts_with(&omafind_core::paths::tilde(p)))
-            })
-            .collect()
+            WHAT,
+        )?
     };
     let code: Vec<PathBuf> = if !options.code.is_empty() {
         options
@@ -152,71 +125,55 @@ pub fn run(options: Options) -> Result<()> {
             .iter()
             .map(|p| omafind_index::indexer::resolve_root(p))
             .collect::<Result<_>>()?
-    } else if !options.yes && have("gum") {
+    } else if ui::interactive(options.yes) {
         let candidates = omafind_setup::candidate_code_folders(&config);
         if candidates.is_empty() {
             Vec::new()
         } else {
-            let labelled: Vec<(String, bool)> = candidates
-                .iter()
-                .map(|(s, on)| {
-                    (
-                        format!(
-                            "{:<14} {}",
-                            omafind_core::paths::tilde(&s.path),
-                            s.summary()
-                        ),
-                        *on,
-                    )
-                })
-                .collect();
-            let chosen = choose(
-                "Index code too? Searched separately with a `code:` prefix (enter to skip)",
-                &labelled,
-                false,
-            );
-            candidates
-                .into_iter()
-                .map(|(s, _)| s.path)
-                .filter(|p| {
-                    chosen
-                        .iter()
-                        .any(|c| c.starts_with(&omafind_core::paths::tilde(p)))
-                })
-                .collect()
+            let (items, on) = folder_items(&candidates);
+            ui::choose(
+                "Index code too? It is searched on its own, with `code:` (enter to skip)",
+                &items,
+                on,
+                options.yes,
+                WHAT,
+            )?
         }
     } else {
         config.code_roots()
     };
     if folders.is_empty() && code.is_empty() {
-        eprintln!("• no folders chosen; `omafind index ~/Pictures ~/Documents` picks them later");
+        cliclack::log::warning(
+            "No folders chosen: `omafind index ~/Pictures ~/Documents` picks them later",
+        )?;
     } else {
         config.set_folders(&folders, &code);
-        eprintln!(
-            "• indexing {}",
-            folders
-                .iter()
-                .chain(code.iter())
-                .map(|p| omafind_core::paths::tilde(p))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+        let list = folders
+            .iter()
+            .chain(code.iter())
+            .map(|p| tilde(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        cliclack::log::success(format!("Indexing {list}"))?;
         if !dry {
             config.save()?;
         }
     }
 
     // 3. The daemon.
-    if confirm(
-        "Start the indexing daemon now and at every login (systemd user service)?",
+    if ui::confirm(
+        "Start the indexing daemon now and at every login?",
         options.yes,
-    ) && !dry
+        WHAT,
+    )? && !dry
     {
+        let starting = cliclack::spinner();
+        starting.start("Starting omafindd (systemd user service)");
         match omafind_setup::start_daemon(&std::env::current_exe()?.with_file_name("omafindd")) {
-            Ok(()) => eprintln!("• omafindd is running"),
-            Err(error) => eprintln!(
-                "• couldn't start omafindd with systemd ({error:#}); run `omafindd` by hand to see why"
-            ),
+            Ok(()) => starting.stop("omafindd is running"),
+            Err(error) => starting.error(format!(
+                "Couldn't start omafindd with systemd ({error:#}); run `omafindd` to see why"
+            )),
         }
         if omafind_client::Client::is_running()
             && let Ok(mut client) = omafind_client::Client::connect()
@@ -230,51 +187,64 @@ pub fn run(options: Options) -> Result<()> {
 
     // 4. Hyprland: keybinding, window rules, autostart, in ~/.config/hypr/omafind.lua.
     let have = hypr::installed();
-    let mut wanted = hypr::Parts::default();
-    for (part, slot, what) in [
+    let parts = [
         (
+            "binding",
             have.binding,
-            &mut wanted.binding,
-            "the SUPER + CTRL + G keybinding",
+            "SUPER + CTRL + G opens the search window",
         ),
         (
+            "rules",
             have.rules,
-            &mut wanted.rules,
-            "the window rules (floating, centred, in the special:omafind workspace)",
+            "Window rules: floating, centred, in its own special workspace",
         ),
         (
+            "autostart",
             have.autostart,
-            &mut wanted.autostart,
-            "starting omafind-app with the session",
+            "Start the window with the session, so it opens instantly",
         ),
-    ] {
-        if part {
-            eprintln!("• {what} already in ~/.config/hypr/omafind.lua");
-        } else if confirm(
-            &format!("Add {what} to ~/.config/hypr/omafind.lua?"),
-            options.yes,
-        ) && !dry
-        {
-            *slot = true;
-        }
+    ];
+    for (_, _, label) in parts.iter().filter(|(_, present, _)| *present) {
+        cliclack::log::success(format!("{label} (already in ~/.config/hypr/omafind.lua)"))?;
     }
-    if omafind_setup::install_hyprland(wanted.binding, wanted.rules, wanted.autostart)? {
-        eprintln!("• Hyprland reloaded");
+    let absent: Vec<(&str, String, String)> = parts
+        .iter()
+        .filter(|(_, present, _)| !*present)
+        .map(|(key, _, label)| (*key, label.to_string(), String::new()))
+        .collect();
+    if !absent.is_empty() {
+        let on = absent.iter().map(|(k, _, _)| *k).collect();
+        let chosen = ui::choose(
+            "Add to ~/.config/hypr/omafind.lua:",
+            &absent,
+            on,
+            options.yes,
+            WHAT,
+        )?;
+        if !dry {
+            let pick = |key: &str| chosen.contains(&key);
+            if omafind_setup::install_hyprland(pick("binding"), pick("rules"), pick("autostart"))? {
+                cliclack::log::success("Hyprland config written and reloaded")?;
+            }
+        }
     }
 
     // 5. The window, resident from now on.
     if !dry && omafind_setup::start_app(&std::env::current_exe()?.with_file_name("omafind-app"))? {
-        eprintln!("• omafind-app started; SUPER + CTRL + G opens it");
+        cliclack::log::success("omafind-app started")?;
     }
-    eprintln!("Done. `omafind status` shows the indexer, `omafind doctor` checks everything.");
+    cliclack::outro(
+        "Done. SUPER + CTRL + G searches; `omafind status` and `omafind doctor` say how it's going.",
+    )?;
     Ok(())
 }
 
 /// `omafind uninstall`: stops the daemon, removes the config lines, and (asked) the data.
 pub fn uninstall(yes: bool, keep_data: bool) -> Result<()> {
+    cliclack::intro("Omafind uninstall")?;
     let _ = Command::new("systemctl")
         .args(["--user", "disable", "--now", "omafindd"])
-        .status();
+        .output();
     let unit = omafind_core::paths::config_dir()
         .parent()
         .context("config dir")?
@@ -284,32 +254,52 @@ pub fn uninstall(yes: bool, keep_data: bool) -> Result<()> {
         let _ = Command::new("systemctl")
             .args(["--user", "daemon-reload"])
             .status();
+        cliclack::log::success("Stopped omafindd and removed its service")?;
     }
     let _ = Command::new("pkill").args(["-x", "omafind-app"]).status();
     for path in hypr::uninstall()? {
-        eprintln!(
-            "• removed Omafind's lines from {}",
-            omafind_core::paths::tilde(&path)
-        );
+        cliclack::log::success(format!("Removed Omafind's lines from {}", tilde(&path)))?;
     }
     hypr::reload();
+    let dirs = [
+        omafind_core::paths::data_dir(),
+        omafind_core::paths::cache_dir(),
+        omafind_core::paths::config_dir(),
+    ];
+    let bytes: u64 = dirs.iter().map(|d| size_of(d)).sum();
     if !keep_data
-        && confirm(
-            "Delete the index, thumbnails, config and model files (~1.3 GB)?",
+        && bytes > 0
+        && ui::confirm(
+            format!(
+                "Delete the index, thumbnails, config and model files ({} MB)?",
+                bytes / 1_000_000
+            ),
             yes,
-        )
+            "Uninstall",
+        )?
     {
-        for dir in [
-            omafind_core::paths::data_dir(),
-            omafind_core::paths::cache_dir(),
-            omafind_core::paths::config_dir(),
-        ] {
+        for dir in &dirs {
             if dir.exists() {
-                std::fs::remove_dir_all(&dir)?;
-                eprintln!("• removed {}", omafind_core::paths::tilde(&dir));
+                std::fs::remove_dir_all(dir)?;
+                cliclack::log::success(format!("Removed {}", tilde(dir)))?;
             }
         }
     }
-    eprintln!("Omafind is gone. The binaries are left for your package manager.");
+    cliclack::outro("Omafind is gone. The binaries are left for your package manager.")?;
     Ok(())
+}
+
+/// Bytes under `dir`, following no links.
+fn size_of(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => size_of(&e.path()),
+            Ok(t) if t.is_file() => e.metadata().map(|m| m.len()).unwrap_or(0),
+            _ => 0,
+        })
+        .sum()
 }

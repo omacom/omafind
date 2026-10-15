@@ -1,4 +1,4 @@
-//! Setting Omafind up, step by step, without asking: the callers (`omafind setup` with gum, the window's first-run
+//! Setting Omafind up, step by step, without asking: the callers (`omafind setup` with cliclack prompts, the window's first-run
 //! screen) do the asking. Every step is safe to repeat.
 
 pub mod download;

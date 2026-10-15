@@ -23,7 +23,7 @@ untested (polkit refuses `powerprofilesctl` from an agent shell). Phase 5 (the w
 Hyprland keeps its window in the `special:omafind` workspace (packaging/hypr-window-rules.lua) and `omafind toggle` flips
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
 subscribes to omafindd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `omafind setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
-through gum, systemd user unit, `~/.config/hypr/omafind.lua`), the same setup as a screen in the window (first run, or
+with cliclack prompts, systemd user unit, `~/.config/hypr/omafind.lua`), the same setup as a screen in the window (first run, or
 Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`downloadModels`), `omafind doctor`, `omafind eval`
 (recall@1/@5 over `evals/queries.json`), `omafind uninstall`, code index (`code:` prefix, separate `code.sqlite`,
 whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/omafind/engine).
@@ -111,7 +111,7 @@ cargo build --release -p omafind-embed && cargo build -p omafind-app
 cargo run --release -p omafind-embed --bin embed-spike -- demo [--cpu]
 cargo run --release -p omafind-embed --bin embed-spike -- golden evals/reference [--write]
 cargo run -p omafind-app -- --dev      # hot-reloads ui/ on save, writes ui/gpui-kit.d.ts
-cargo test --release
+cargo nextest run --release   # or `just test`; nextest skips doctests: cargo test --doc
 ```
 
 `sudo` needs a password in agent sessions: ask the user to install packages. Already on Omarchy: `ffmpeg`,
@@ -239,7 +239,7 @@ Then `./target/debug/omafind-app --dev --ui $PWD/ui &`, `hyprctl clients -j` (cl
 
 - Bash in Omarchy style: `#!/bin/bash`, `set -euo pipefail`, `[[ ]]`/`(( ))`, two-space indent. Our commands are
   `omafind`/`omafindd`; only first-party Omarchy commands use the `omarchy-` prefix. Reuse what Omarchy ships (`ffmpeg`,
-  `tesseract`, `mpv`, `imv`, `evince`, `gum`, `omarchy-launch-editor`, `omarchy-hw-*`). No polling: inotify, D-Bus,
+  `tesseract`, `mpv`, `imv`, `evince`, `omarchy-launch-editor`, `omarchy-hw-*`). No polling: inotify, D-Bus,
   socket pushes.
 - Rust edition 2024, workspace deps in the root `Cargo.toml`. Comments say why, not what.
 - Commit only when the user asks; never add a Claude co-author trailer or "Generated with" line.

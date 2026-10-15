@@ -45,20 +45,21 @@ pub fn present(dir: &Path, file: &ModelFile) -> bool {
     dir.join(file.name).exists()
 }
 
-/// Fetches `file` into `dir` unless it is there, reporting progress on stderr.
-pub fn fetch(dir: &Path, file: &ModelFile) -> Result<()> {
-    fetch_with(dir, file, &mut |done, total| {
-        eprint!(
-            "\r{}: {:>3}% of {} MB   ",
-            file.name,
-            done * 100 / total.max(1),
-            total / 1_000_000
-        );
-    })
+/// What a fetch is doing, for whoever shows it (a progress bar in the terminal, a line in the window).
+#[derive(Debug, Clone, Copy)]
+pub enum Progress {
+    /// Copying a copy from the Hugging Face cache.
+    Copying,
+    Downloading {
+        done: u64,
+        total: u64,
+    },
+    /// Checking the SHA-256.
+    Checking,
 }
 
-/// Like `fetch`, with progress as (bytes done, bytes total).
-pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
+/// Fetches `file` into `dir` unless it is there.
+pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(Progress)) -> Result<()> {
     let target = dir.join(file.name);
     if target.exists() {
         return Ok(());
@@ -70,10 +71,12 @@ pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u6
         .map(|m| m.len() == file.bytes)
         .unwrap_or(false)
     {
-        eprintln!("{}: copying from the Hugging Face cache", file.name);
+        progress(Progress::Copying);
         std::fs::copy(&cached, &part)?;
     } else {
-        download(&part, file, progress)?;
+        download(&part, file, &mut |done, total| {
+            progress(Progress::Downloading { done, total })
+        })?;
     }
     let size = std::fs::metadata(&part)?.len();
     if size != file.bytes {
@@ -83,13 +86,12 @@ pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u6
             file.bytes
         );
     }
-    eprint!("{}: checking…", file.name);
+    progress(Progress::Checking);
     let got = sha256_of(&part)?;
     if got != file.sha256 {
         let _ = std::fs::remove_file(&part);
         bail!("{}: SHA-256 mismatch ({got})", file.name);
     }
-    eprintln!(" ok");
     std::fs::rename(&part, &target)?;
     Ok(())
 }
