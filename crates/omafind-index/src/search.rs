@@ -196,6 +196,7 @@ pub fn rank(
             fused,
             |id| rows.get(&id).map(|r| r.file_id),
             |id| rows.get(&id).is_some_and(|r| r.kind == ChunkKind::Name),
+            |id| rows.get(&id).is_some_and(|r| r.text.trim().is_empty()),
         );
         frecency(store, &mut files, &rows)?;
         Ok(Pass {
@@ -378,7 +379,12 @@ pub fn similar(
         .map(|r| (r.id, r))
         .collect();
     let fused = ranking::fuse(&near, &[], &[], |_| 0.0);
-    let files = ranking::collapse(fused, |id| rows.get(&id).map(|r| r.file_id), |_| false);
+    let files = ranking::collapse(
+        fused,
+        |id| rows.get(&id).map(|r| r.file_id),
+        |_| false,
+        |_| false,
+    );
     Ok(files
         .iter()
         .filter_map(|f| rows.get(&f.chunk_id).map(|r| hit(r, f, &[], true)))

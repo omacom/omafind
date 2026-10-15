@@ -125,6 +125,34 @@ sandbox-app:
     echo "omafind-app $(cat {{ sandbox }}/omafind-app.pid) on $dir"
 
 # Stop the sandbox daemon and window (by PID; the real service is left alone)
+# The fake home (evals/make-home.sh) is made once under the sandbox dir; paths and dates then look like real use.
+# Daemon on a realistic fake home as $HOME; then `just demo-app`, and `just sandbox-stop` stops both
+demo: build
+    #!/bin/bash
+    set -euo pipefail
+    home="{{ sandbox }}/home"
+    [[ -d $home/Documents ]] || evals/make-home.sh "$home"
+    [[ -f {{ sandbox }}/omafindd.pid ]] && kill "$(cat {{ sandbox }}/omafindd.pid)" 2>/dev/null || true
+    mkdir -p "$home/run"
+    # The real models, found before HOME changes.
+    models="${OMAFIND_MODELS:-$HOME/.local/share/omafind/models}"
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" \
+      XDG_RUNTIME_DIR="$home/run" OMAFIND_MODELS="$models" \
+      target/release/omafindd > "{{ sandbox }}/demo.log" 2>&1 &
+    echo $! > "{{ sandbox }}/omafindd.pid"
+    echo "omafindd $(cat {{ sandbox }}/omafindd.pid) on $home; log: {{ sandbox }}/demo.log"
+
+# The window (debug build, hot reload) on the `just demo` home
+demo-app:
+    #!/bin/bash
+    set -euo pipefail
+    home="{{ sandbox }}/home"
+    cargo build -p omafind-app
+    HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" \
+      OMAFIND_SOCKET="$home/run/omafind.sock" target/debug/omafind-app --dev --ui "$PWD/ui" &
+    echo $! > "{{ sandbox }}/omafind-app.pid"
+    echo "omafind-app $(cat {{ sandbox }}/omafind-app.pid) on $home"
+
 sandbox-stop:
     #!/bin/bash
     for f in "{{ sandbox }}"/omafindd.pid "{{ sandbox }}"/omafind-app.pid; do

@@ -35,6 +35,7 @@ export default class Omafind extends View {
     /** @type {Result[]} */
     this.results = [];
     this.selected = 0;
+    this.moved = false; // whether the selection was moved by hand since this query's first answer
     this.filter = 0;
     this.counts = null;
     this.chips = [];
@@ -188,9 +189,12 @@ export default class Omafind extends View {
     });
   }
 
-  /** Puts an answer on screen, keeping the selected file selected when it is still there. */
+  /** Puts an answer on screen. The selection stays on the same file only when someone moved it there, for the same
+   *  query (the full answer replacing the quick one, a reindex); otherwise it starts at the top, where the best
+   *  result is. */
   show(answer, quick, cx) {
-    const keep = this.results[this.selected]?.path;
+    if (answer.query !== this.searched) this.moved = false;
+    const keep = this.moved ? this.results[this.selected]?.path : null;
     if (this.menu) this.menu = null;
     this.error = null;
     this.results = answer.results;
@@ -200,7 +204,7 @@ export default class Omafind extends View {
     this.counts = answer.counts;
     this.chips = answer.chips;
     const again = keep ? this.results.findIndex((r) => r.path === keep) : -1;
-    this.selected = again >= 0 && !quick ? again : 0;
+    this.selected = again >= 0 ? again : 0;
     this.scroll.scroll_to_item(this.rowOf(this.selected));
     cx.notify();
     this.loadThumbs(cx);
@@ -312,6 +316,7 @@ export default class Omafind extends View {
   move(delta, cx) {
     if (this.results.length === 0) return;
     this.selected = Math.max(0, Math.min(this.results.length - 1, this.selected + delta));
+    this.moved = true;
     this.scroll.scroll_to_item(this.rowOf(this.selected));
     this.loadPreview(cx);
     cx.notify();
@@ -529,6 +534,7 @@ export default class Omafind extends View {
         if (this.selected === index) this.openSelected(cx);
         else {
           this.selected = index;
+          this.moved = true;
           this.loadPreview(cx);
           cx.notify();
         }
@@ -574,6 +580,7 @@ export default class Omafind extends View {
         if (this.selected === index) this.openSelected(cx);
         else {
           this.selected = index;
+          this.moved = true;
           this.loadPreview(cx);
           cx.notify();
         }
@@ -792,7 +799,7 @@ export default class Omafind extends View {
     } else if (picture && row.kind !== "doc") {
       const pane = div().flex_1().min_h_0().rounded(cx.theme().radius.md).overflow_hidden().bg(c.surface).flex().items_center().justify_center().child(image(picture).size_full());
       body = v_flex().flex_1().min_h_0().gap(10).child(pane);
-      if (data.passage?.text && row.kind === "pdf") body = body.child(this.passageView(row, data.passage, 140, cx));
+      if (data.passage?.text && row.kind === "pdf") body = body.child(this.passageView(row, fromMatch(data.passage, row.snippet), 140, cx));
     } else if (data.passage || row.snippet) {
       body = this.passageView(row, data.passage ?? { text: row.snippet, before: "", after: "" }, null, cx);
     } else {
@@ -1208,6 +1215,22 @@ function block(data, best) {
   while (from > data.first && text.has(from - 1) && !blank(from - 1)) from--;
   while (to < data.last && text.has(to + 1) && !blank(to + 1)) to++;
   return [from, to];
+}
+
+/** A page's text from shortly before where the row's snippet starts (where the query's words cluster), so the
+ *  small passage box under a PDF page shows the match rather than the page's first lines. */
+function fromMatch(passage, snippet) {
+  // pdftotext keeps the page's layout as runs of spaces; the snippet doesn't, so compare with spaces collapsed.
+  const flat = (t) => plain(t).replace(/\s+/g, " ");
+  const anchor = flat(snippet || "").replace(/^…\s*/, "").slice(0, 40).trim();
+  const text = flat(passage.text);
+  const at = anchor ? text.indexOf(anchor) : -1;
+  if (at <= 0) return passage;
+  // Back to the start of the sentence the match is in, if one starts within 200 characters.
+  const head = text.slice(Math.max(0, at - 200), at);
+  const sentence = Math.max(head.lastIndexOf(". "), head.lastIndexOf("\n"));
+  const start = sentence >= 0 ? at - head.length + sentence + 1 : at;
+  return { text: "…" + text.slice(start).trimStart(), before: "", after: passage.after };
 }
 
 function language(path) {

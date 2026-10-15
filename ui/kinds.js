@@ -40,6 +40,11 @@ export function filterCount(filter, counts) {
 /** The tag on a row: why it matched and where. */
 export function tag(row) {
   const where = row.locatorLabel;
+  // Code matches a stretch of lines; which list found it matters less than where it is (the design's "lines 88–121").
+  if (row.kind === "code" && row.locator && row.reason !== "name") {
+    const end = row.locatorEnd ?? row.locator;
+    return end > row.locator ? `lines ${row.locator}–${end}` : `line ${row.locator}`;
+  }
   switch (row.reason) {
     case "picture": return row.kind === "video" ? `seen at ${where}` : row.kind === "pdf" ? `page ${where.replace("p. ", "")} looks like it` : "by picture";
     case "sound": return where ? `said at ${where}` : "by sound";

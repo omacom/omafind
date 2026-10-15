@@ -149,11 +149,15 @@ pub fn fuse(
 /// One entry per file, in score order. A file's score is its best chunk plus a share of its other hits, so a
 /// photo whose name also matches outranks one that matched only by picture. The entry keeps the best *content*
 /// chunk (not the file-name chunk) when one scored at least half as well, so the locator and snippet point at
-/// something inside the file. `file_of` maps a chunk to its file; `is_name` says whether a chunk is the name.
+/// something inside the file. When that chunk has no text to show (a picture, a sound) and another of the file's
+/// chunks holds the query's words, that one represents it instead, however it scored: a screenshot found by its
+/// text shows the text rather than "by picture". `file_of` maps a chunk to its file; `is_name` says whether a chunk
+/// is the name; `textless` whether it has no text (an image, a frame, a stretch of audio).
 pub fn collapse(
     fused: Vec<Fused>,
     file_of: impl Fn(i64) -> Option<i64>,
     is_name: impl Fn(i64) -> bool,
+    textless: impl Fn(i64) -> bool,
 ) -> Vec<Fused> {
     let mut per_file: Vec<(i64, Vec<Fused>)> = Vec::new();
     let mut index: HashMap<i64, usize> = HashMap::new();
@@ -175,10 +179,17 @@ pub fn collapse(
             let best = hits[0].score;
             let rest: f64 = hits.iter().skip(1).map(|h| h.score).sum();
             let score = best + 0.5 * rest;
-            let representative = hits
+            let mut representative = hits
                 .iter()
                 .find(|h| !is_name(h.chunk_id) && h.score >= best * 0.5)
                 .unwrap_or(&hits[0]);
+            if textless(representative.chunk_id)
+                && let Some(worded) = hits
+                    .iter()
+                    .find(|h| h.from_keywords && !is_name(h.chunk_id) && !textless(h.chunk_id))
+            {
+                representative = worded;
+            }
             let similarity = representative
                 .similarity
                 .or_else(|| hits.iter().find_map(|h| h.similarity));
@@ -458,7 +469,12 @@ mod tests {
                 from_keywords: false,
             },
         ];
-        let out = collapse(fused, |c| Some(if c == 2 { 1 } else { c }), |_| false);
+        let out = collapse(
+            fused,
+            |c| Some(if c == 2 { 1 } else { c }),
+            |_| false,
+            |_| false,
+        );
         assert_eq!(
             out.iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
             vec![1, 3]
@@ -479,8 +495,43 @@ mod tests {
                 from_keywords: false,
             },
         ];
-        let out = collapse(fused, |_| Some(1), |c| c == 10);
+        let out = collapse(fused, |_| Some(1), |c| c == 10, |_| false);
         assert_eq!((out[0].chunk_id, out[0].similarity), (11, Some(0.7)));
+        // A screenshot: the picture scored best, but its OCR text holds a word, so the text represents it, even
+        // though it scored far lower.
+        let fused = vec![
+            Fused {
+                chunk_id: 20,
+                score: 1.0,
+                similarity: Some(0.7),
+                from_keywords: false,
+            },
+            Fused {
+                chunk_id: 21,
+                score: 0.2,
+                similarity: None,
+                from_keywords: true,
+            },
+        ];
+        let out = collapse(fused, |_| Some(2), |_| false, |c| c == 20);
+        assert_eq!(out[0].chunk_id, 21);
+        // Two passages of one document: the better one stays, whichever holds the words.
+        let fused = vec![
+            Fused {
+                chunk_id: 30,
+                score: 1.0,
+                similarity: Some(0.6),
+                from_keywords: false,
+            },
+            Fused {
+                chunk_id: 31,
+                score: 0.2,
+                similarity: None,
+                from_keywords: true,
+            },
+        ];
+        let out = collapse(fused, |_| Some(3), |_| false, |_| false);
+        assert_eq!(out[0].chunk_id, 30);
     }
 
     #[test]

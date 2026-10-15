@@ -103,7 +103,8 @@ Consequences to design for:
 
 The `justfile` holds the everyday commands (`just` lists them): `bootstrap` (engine + models), `build`, `dev`,
 `check` (fmt, clippy `-D warnings`, tests), `golden`, `bench`, `eval`, `sandbox FOLDER` / `sandbox-app` /
-`sandbox-stop`, `install`. Underneath:
+`sandbox-stop`, `demo` / `demo-app` (a realistic fake home from `evals/make-home.sh` as `$HOME`: use it for
+screenshots and UI checks, so paths and content look like real use), `install`. Underneath:
 
 ```bash
 scripts/fetch-engine.sh [vulkan|cpu|cuda-13.4|rocm-10.0]   # prebuilt llama.cpp + headers, seconds
