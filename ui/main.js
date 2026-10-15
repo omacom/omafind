@@ -813,12 +813,13 @@ export default class Omafind extends View {
       .gap(12)
       .border_l(1)
       .border_color(c.border)
-      .child(
+      // The list row already shows the name, tag, folder and date; only the grid, whose tiles carry none, repeats them.
+      .when(this.isGrid(), (pane) => pane.child(
         v_flex()
           .gap(3)
           .child(h_flex().gap(8).items_center().child(div().text_size(14).font_medium().text_color(c.foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name)).child(this.pill(tag(row), cx, true)).child(row.duplicates.length ? this.pill(`${row.duplicates.length} more like it: ${row.duplicates.map((d) => d.split("/").pop()).slice(0, 3).join(", ")}${row.duplicates.length > 3 ? "…" : ""}`, cx, false) : div()))
           .child(div().text_size(11).text_color(c.muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(info)),
-      )
+      ))
       .child(body);
   }
 
@@ -828,8 +829,9 @@ export default class Omafind extends View {
     const c = cx.theme().colors;
     const code = row.kind === "code";
     const words = row.matchedWords;
-    const inside = (n) => n >= data.first && n <= data.last;
     const best = data.best ?? data.first;
+    const [top, bottom] = block(data, best);
+    const inside = (n) => n >= top && n <= bottom;
     const lang = code ? language(row.path) : null;
     const palette = syntax();
     const colors = {
@@ -1193,6 +1195,19 @@ function bestLine(data, words) {
     if (count > most) [best, most] = [l.n, count];
   }
   return best;
+}
+
+/** The paragraph around `best`: the lines between the blank lines either side, within the matched stretch. A
+ *  passage is ~1,500 characters (a short file is one passage), so tinting all of it says little; the paragraph
+ *  holding the words is what the match is about. */
+function block(data, best) {
+  const text = new Map(data.lines.map((l) => [l.n, l.text]));
+  const blank = (n) => !(text.get(n) ?? "").trim();
+  let from = best;
+  let to = best;
+  while (from > data.first && text.has(from - 1) && !blank(from - 1)) from--;
+  while (to < data.last && text.has(to + 1) && !blank(to + 1)) to++;
+  return [from, to];
 }
 
 function language(path) {
