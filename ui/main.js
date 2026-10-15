@@ -8,7 +8,7 @@
 import { View, div, image } from "gpui-kit";
 import { homedir } from "os";
 import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list, TextView } from "gpui-base";
-import { search, similar, recents, passage, lines, section, syntax, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
+import { search, similar, recents, passage, lines, section, syntax, imageSize, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
 import { FILTERS, glyph, count, filterCount, tag, when, bytes, duration, marks, alpha, escapeMarkdown } from "./kinds.js";
 import { Setup } from "./setup.js";
 /** @import { AsyncContext, Context } from "gpui-kit" */
@@ -66,6 +66,8 @@ export default class Omafind extends View {
     this.like = null; // the result "more like this" started from
     this.grid = null; // null = follow the filter
     this.cols = 4;
+    /** Thumbnail shape (width / height) by thumbKey, read once from each picture's header. */
+    this.aspects = new Map();
     this.listW = 500;
     this.decided = false;
     this.focusField(cx);
@@ -258,7 +260,10 @@ export default class Omafind extends View {
           const key = thumbKey(row);
           if (this.thumbs.has(key)) continue;
           try {
-            this.thumbs.set(key, await thumb(row.path, row.kind, row.locator, "small"));
+            const path = await thumb(row.path, row.kind, row.locator, "small");
+            this.thumbs.set(key, path);
+            const size = path ? imageSize(path) : null;
+            if (size && size.height > 0) this.aspects.set(key, size.width / size.height);
           } catch (_) {
             this.thumbs.set(key, null);
           }
@@ -485,13 +490,21 @@ export default class Omafind extends View {
     const badge = (row.kind === "video" || row.kind === "audio") && row.locatorLabel
       ? div().absolute().left(3).bottom(3).px(3).rounded(2).bg(alpha(c.background, 0.75)).text_size(9).text_color(c.foreground).child(row.locatorLabel)
       : div();
-    if (p) return cell.child(image(p).size_full()).child(badge);
+    if (p) return cell.bg(c.background).child(this.fitted(p, row, w, h)).child(badge);
     // Documents and code without a picture show their type, the way a file card would.
     if (row.kind === "doc" || row.kind === "code") {
       const ext = row.name.includes(".") ? row.name.split(".").pop().toUpperCase().slice(0, 4) : "TXT";
       return cell.bg(c.surface).border(1).border_color(c.border).text_size(10).text_color(c.muted_foreground).child(ext);
     }
     return cell.text_size(Math.min(w, h) * 0.4).text_color(c.muted_foreground).child(glyph(row.kind)).child(badge);
+  }
+
+  /** Picture `p` whole inside a `w`×`h` box at its own shape (contain): a page stands tall, a video frame lies wide.
+   *  The box centres it. */
+  fitted(p, row, w, h) {
+    const aspect = this.aspects.get(thumbKey(row)) ?? w / h;
+    const [fw, fh] = aspect > w / h ? [w, Math.round(w / aspect)] : [Math.round(h * aspect), h];
+    return image(p).w(fw).h(fh).rounded(3);
   }
 
   /** The matched passage under a result's name: up to two lines, the query's words tinted like a highlighter. */
@@ -559,6 +572,8 @@ export default class Omafind extends View {
       );
   }
 
+  /** A grid tile: square, so rows line up for the eye and the arrow keys; the picture whole inside it, at its own
+   *  shape. */
   tile(row, index, cx) {
     const c = cx.theme().colors;
     const selected = index === this.selected;
@@ -586,7 +601,12 @@ export default class Omafind extends View {
         }
       })
       .relative()
-      .child(p ? image(p).size_full() : div().text_size(28).text_color(c.muted_foreground).child(glyph(row.kind)))
+      .child(p ? this.fitted(p, row, TILE - 4, TILE - 4) : div().text_size(28).text_color(c.muted_foreground).child(glyph(row.kind)))
+      .child(
+        row.kind === "video" && row.locatorLabel
+          ? div().absolute().left(6).bottom(6).px(5).py(1).rounded(3).bg(alpha(c.background, 0.75)).text_size(10).text_color(c.foreground).child(`▶ ${row.locatorLabel}`)
+          : div(),
+      )
       .child(
         row.duplicates.length
           ? div().absolute().top(6).right(6).px(6).py(1).rounded(3).bg(alpha(c.background, 0.8)).text_size(10).text_color(c.foreground).child(`+${row.duplicates.length}`)

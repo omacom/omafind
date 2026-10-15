@@ -243,6 +243,11 @@ cp "$TB/img/spaghetti_plate.jpg" "$H/Pictures/2025/Camera/IMG_2236.jpg"
 cp "$TB/img/red_car.jpg" "$H/Pictures/2025/Camera/IMG_2290.jpg"
 cp "$TB/img/city_night.jpg" "$H/Pictures/2025/Camera/IMG_2315.jpg"
 cp "$TB/img/office_desk.jpg" "$H/Pictures/2025/Camera/IMG_2347.jpg"
+# Phone photos are mostly portrait: crops of the testbed shots, so tall pictures sit beside wide ones.
+magick "$TB/img/city_night.jpg" -gravity center -crop 56%x100%+0+0 +repage "$H/Pictures/2025/Camera/IMG_2318.jpg"
+magick "$TB/img/mountain_lake.jpg" -gravity center -crop 50%x100%+0+0 +repage "$H/Pictures/2024/Algarve/IMG_4510.jpg"
+magick "$TB/img/spaghetti_plate.jpg" -gravity center -crop 60%x100%+0+0 +repage "$H/Pictures/2025/Camera/IMG_2240.jpg"
+magick "$TB/img/cat_sofa.jpg" -gravity center -crop 100%x70%+0+0 +repage -resize 160%x100%! "$H/Pictures/2025/Camera/PANO_2205.jpg"
 
 shot() { # shot NAME TEXT: a dark app-window screenshot with TEXT in it
   magick -size 1280x720 xc:'#1a1b26' \
@@ -337,6 +342,10 @@ stamp "2025-03-30 20:12" "Pictures/2025/Camera/IMG_2236.jpg"
 stamp "2025-05-02 12:03" "Pictures/2025/Camera/IMG_2290.jpg"
 stamp "2025-07-21 23:18" "Pictures/2025/Camera/IMG_2315.jpg"
 stamp "2025-09-01 09:02" "Pictures/2025/Camera/IMG_2347.jpg"
+stamp "2025-07-21 23:31" "Pictures/2025/Camera/IMG_2318.jpg"
+stamp "2024-08-17 08:12" "Pictures/2024/Algarve/IMG_4510.jpg"
+stamp "2025-03-30 20:15" "Pictures/2025/Camera/IMG_2240.jpg"
+stamp "2025-01-19 15:52" "Pictures/2025/Camera/PANO_2205.jpg"
 stamp "2025-03-12 08:15" "Recordings/voice-memo-2025-03-12.m4a"
 stamp "2025-06-05 10:02" "Recordings/voice-memo-2025-06-05.m4a"
 stamp "2025-09-30 18:44" "Recordings/voice-memo-2025-09-30.m4a"

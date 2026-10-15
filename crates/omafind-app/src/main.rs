@@ -105,6 +105,8 @@ export function lines(path: string, from: number, to: number): Promise<Line[]>;
 /** A plain text file's lines around characters `start`..`end` (a passage), and the passage's first and last line;
  *  null for documents whose text isn't the file's own (office, HTML). */
 export function section(path: string, start: number, end: number): Promise<{ lines: Line[]; first: number; last: number } | null>;
+/** A thumbnail's pixel size, read from its header (cheap), so a tile can take the picture's own shape. */
+export function imageSize(path: string): { width: number; height: number } | null;
 /** Theme colors for code beyond the gpui-base roles, or null before a theme loads. */
 export function syntax(): { number: string; string: string } | null;
 /** The picture for a result: "small" (rows, grid) or "large" (preview); null when the kind has none. */
@@ -595,6 +597,16 @@ fn omafind_module(shared: Shared) -> HostModule {
             })
         })
         .declarations(OMAFIND_TYPES)
+        .function("imageSize", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            Ok(match thumbs::dimensions(&path) {
+                Some((width, height)) => HostObject::new()
+                    .field("width", width as f64)
+                    .field("height", height as f64)
+                    .into(),
+                None => HostValue::Null,
+            })
+        })
         .function("syntax", |_| {
             Ok(match theme::SYNTAX.lock().unwrap().clone() {
                 Some((number, string)) => HostObject::new()

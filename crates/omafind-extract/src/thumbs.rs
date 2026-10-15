@@ -14,7 +14,7 @@ use crate::{Chunk, Embed};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Size {
-    /// 256 px square, cropped to fill (rows and the grid draw squares; GPUI has no object-fit).
+    /// 384 px on the long side, uncropped: rows and the masonry grid size each picture's box to its own shape.
     Small,
     /// 1280 px on the long side.
     Large,
@@ -23,14 +23,14 @@ pub enum Size {
 impl Size {
     pub fn pixels(self) -> u32 {
         match self {
-            Self::Small => 256,
+            Self::Small => 384,
             Self::Large => 1280,
         }
     }
 
     fn dir(self) -> &'static str {
         match self {
-            Self::Small => "sq",
+            Self::Small => "fit",
             Self::Large => "l",
         }
     }
@@ -63,32 +63,25 @@ pub fn get(path: &Path, kind: FileKind, locator: Option<f64>, size: Size) -> Opt
         return Some(out);
     }
     std::fs::create_dir_all(out.parent()?).ok()?;
-    let square = size == Size::Small;
-    let crop = if kind == FileKind::Pdf {
-        Crop::Top
-    } else {
-        Crop::Center
-    };
     let ok = match kind {
         FileKind::Image | FileKind::Screenshot => {
-            scale(path, &out, size.pixels(), square.then_some(crop))
-                || (thumbnailer(path, &out, None, size.pixels()) && (!square || refit(&out, crop)))
+            scale(path, &out, size.pixels()) || thumbnailer(path, &out, None, size.pixels())
         }
-        FileKind::Video => {
-            thumbnailer(path, &out, locator.or(Some(0.0)), size.pixels())
-                && (!square || refit(&out, crop))
-        }
-        FileKind::Pdf => {
-            pdf_page(
-                path,
-                locator.map(|p| p.max(1.0) as u32).unwrap_or(1),
-                &out,
-                size.pixels(),
-            ) && (!square || refit(&out, crop))
-        }
+        FileKind::Video => thumbnailer(path, &out, locator.or(Some(0.0)), size.pixels()),
+        FileKind::Pdf => pdf_page(
+            path,
+            locator.map(|p| p.max(1.0) as u32).unwrap_or(1),
+            &out,
+            size.pixels(),
+        ),
         FileKind::Doc | FileKind::Audio | FileKind::Code => false,
     };
     (ok && out.exists()).then_some(out)
+}
+
+/// A picture's width and height from its header, without decoding it: what the window lays a tile out by.
+pub fn dimensions(path: &Path) -> Option<(u32, u32)> {
+    image::image_dimensions(path).ok()
 }
 
 /// The small pictures a file's results will ask for, while its frames are still on disk: the photo, each video
@@ -107,7 +100,7 @@ pub fn pregenerate(path: &Path, kind: FileKind, chunks: &[Chunk]) {
                 if let Embed::Image { path: frame, .. } = &chunk.embed {
                     let out = path_for(path, chunk.locator, Size::Small);
                     if !out.exists() {
-                        scale(frame, &out, Size::Small.pixels(), Some(Crop::Center));
+                        scale(frame, &out, Size::Small.pixels());
                     }
                 }
             }
@@ -118,7 +111,7 @@ pub fn pregenerate(path: &Path, kind: FileKind, chunks: &[Chunk]) {
                 if let Embed::Image { path: page, .. } = &chunk.embed {
                     let out = path_for(path, chunk.locator, Size::Small);
                     if !out.exists() {
-                        scale(page, &out, Size::Small.pixels(), Some(Crop::Top));
+                        scale(page, &out, Size::Small.pixels());
                     }
                 }
             }
@@ -127,26 +120,9 @@ pub fn pregenerate(path: &Path, kind: FileKind, chunks: &[Chunk]) {
     }
 }
 
-/// Which square a picture is cut down to: its middle, or its top (a page's title is at the top).
-#[derive(Debug, Clone, Copy)]
-enum Crop {
-    Center,
-    Top,
-}
-
-/// Makes a picture an external tool wrote square, in place.
-fn refit(out: &Path, crop: Crop) -> bool {
-    let tmp = out.with_extension("src");
-    std::fs::rename(out, &tmp).is_ok() && {
-        let ok = scale(&tmp, out, Size::Small.pixels(), Some(crop));
-        let _ = std::fs::remove_file(&tmp);
-        ok
-    }
-}
-
-/// Decodes `src`, scales it to fit `max` px (never up) or, with `square`, to fill a `max` square cut as it says,
-/// and writes a JPEG. EXIF orientation is applied so phone photos stand the right way up.
-fn scale(src: &Path, out: &Path, max: u32, square: Option<Crop>) -> bool {
+/// Decodes `src`, scales it to fit `max` px (never up) and writes a JPEG. EXIF orientation is applied so phone
+/// photos stand the right way up.
+fn scale(src: &Path, out: &Path, max: u32) -> bool {
     let Ok(reader) = image::ImageReader::open(src).and_then(|r| r.with_guessed_format()) else {
         return false;
     };
@@ -159,15 +135,6 @@ fn scale(src: &Path, out: &Path, max: u32, square: Option<Crop>) -> bool {
     };
     if let Some(o) = orientation {
         picture.apply_orientation(o);
-    }
-    if let Some(crop) = square {
-        let side = picture.width().min(picture.height());
-        let x = (picture.width() - side) / 2;
-        let y = match crop {
-            Crop::Center => (picture.height() - side) / 2,
-            Crop::Top => 0,
-        };
-        picture = picture.crop_imm(x, y, side, side);
     }
     if picture.width() > max || picture.height() > max {
         picture = picture.resize(max, max, image::imageops::FilterType::Triangle);
