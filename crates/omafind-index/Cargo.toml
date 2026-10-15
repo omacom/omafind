@@ -1,0 +1,18 @@
+[package]
+name = "omafind-index"
+description = "Crawling chosen folders, deciding what to read, embedding it, and answering searches."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omafind-core = { path = "../omafind-core" }
+omafind-embed = { path = "../omafind-embed" }
+omafind-extract = { path = "../omafind-extract" }
+omafind-store = { path = "../omafind-store" }
+anyhow.workspace = true
+serde.workspace = true
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,18 +1,18 @@
-// Dig's search window: a field on top with the filters as chips, results on the left (rows, or a grid for photos),
+// Omafind's search window: a field on top with the filters as chips, results on the left (rows, or a grid for photos),
 // a preview of the selected result on the right, a footer that says what the indexer is doing. Opened with an empty
 // field it shows recent searches and files instead; on a first run, setup. Everything that touches files, the index
-// or processes stays in Rust behind the `dig` host module: this file is layout and keys.
+// or processes stays in Rust behind the `omafind` host module: this file is layout and keys.
 //
-//   cargo run -p dig-app -- --dev      # hot-reloads this file on save
+//   cargo run -p omafind-app -- --dev      # hot-reloads this file on save
 
 import { View, div, image } from "gpui-kit";
 import { homedir } from "os";
 import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list, TextView } from "gpui-base";
-import { search, similar, recents, passage, lines, thumb, status, open, reveal, copy, copyText, trash, hide } from "dig";
+import { search, similar, recents, passage, lines, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
 import { FILTERS, glyph, count, filterCount, tag, when, bytes, duration, marks, alpha, escapeMarkdown } from "./kinds.js";
 import { Setup } from "./setup.js";
 /** @import { AsyncContext, Context } from "gpui-kit" */
-/** @import { Result, Answer } from "dig" */
+/** @import { Result, Answer } from "omafind" */
 
 // Names and keywords answer in a few ms: shown almost at once. The model's answer follows when typing pauses.
 const QUICK_MS = 30;
@@ -25,7 +25,7 @@ const TILE_GAP = 8;
 // Filters typed into the field turn into chips once they are complete (followed by a space).
 const FILTER_RE = /(^|\s)((?:in|type|kind|after|since|before|on|during):\S+|today|yesterday|(?:this|last) (?:week|month|year))(?=\s)/gi;
 
-export default class Dig extends View {
+export default class Omafind extends View {
   /** @param {unknown} _props @param {AsyncContext} cx */
   init(_props, cx) {
     this.query = InputState.new({ placeholder: "Describe it: what it shows, says, or when it was" });
@@ -51,8 +51,8 @@ export default class Dig extends View {
     this.focus.focus();
     // Tab is focus traversal unless something nearer binds it: these bindings hold inside the window's context.
     cx.bind_keys([
-      { keystroke: "tab", action: "dig_next", context: "Dig" },
-      { keystroke: "shift-tab", action: "dig_previous", context: "Dig" },
+      { keystroke: "tab", action: "omafind_next", context: "Omafind" },
+      { keystroke: "shift-tab", action: "omafind_previous", context: "Omafind" },
     ]);
     this.shown = status().shown;
     this.mode = "search";
@@ -100,7 +100,7 @@ export default class Dig extends View {
     });
   }
 
-  /** The list pane follows the window, which Dig sizes to the monitor: wider for the grid, never past half. */
+  /** The list pane follows the window, which Omafind sizes to the monitor: wider for the grid, never past half. */
   layout() {
     const width = window.viewport_size().width;
     if (this.isGrid()) {
@@ -845,7 +845,7 @@ export default class Dig extends View {
   empty(cx) {
     const c = cx.theme().colors;
     const s = status();
-    if (!s.daemon) return this.message("Dig isn't running", "systemctl --user start digd", cx);
+    if (!s.daemon) return this.message("Omafind isn't running", "systemctl --user start omafindd", cx);
     if (s.roots.length === 0) return this.message("Nothing indexed yet", "Ctrl+, picks the folders", cx);
     if (this.error) return this.message("Search failed", this.error, cx);
     if (this.searched !== "") {
@@ -981,7 +981,7 @@ export default class Dig extends View {
               ),
             ),
           )
-          .child(s.failed > 0 ? div().text_size(11).text_color(c.destructive).child(`${count(s.failed)} files couldn't be read · dig status --failed`) : div()),
+          .child(s.failed > 0 ? div().text_size(11).text_color(c.destructive).child(`${count(s.failed)} files couldn't be read · omafind status --failed`) : div()),
       );
   }
 
@@ -1000,7 +1000,7 @@ export default class Dig extends View {
     const s = status();
     const c = cx.theme().colors;
     let left;
-    if (!s.daemon) left = "digd isn't running";
+    if (!s.daemon) left = "omafindd isn't running";
     else if (s.state === "paused") left = `Paused · ${count(s.indexed)} files`;
     else if (s.state === "paused_power_saver") left = `Paused in power-saver · ${count(s.indexed)} files`;
     else if (s.state === "waiting_for_ac") left = `Waiting for a charger · ${count(s.indexed)} files`;
@@ -1062,11 +1062,11 @@ export default class Dig extends View {
       .relative()
       .bg(c.background)
       .font_family(cx.theme().typography.mono)
-      .key_context("Dig")
+      .key_context("Omafind")
       .track_focus(this.focus)
       .on_key_down((event, cx) => this.onKey(event, cx))
-      .on_action("dig_next", (_e, cx) => this.onKey({ keystroke: "tab" }, cx))
-      .on_action("dig_previous", (_e, cx) => this.onKey({ keystroke: "shift-tab" }, cx));
+      .on_action("omafind_next", (_e, cx) => this.onKey({ keystroke: "tab" }, cx))
+      .on_action("omafind_previous", (_e, cx) => this.onKey({ keystroke: "shift-tab" }, cx));
     if (this.mode === "setup") return root.child(this.setup.render(cx, this.firstRun)).child(this.footer(cx));
     const body = this.results.length === 0 ? this.empty(cx) : h_flex().flex_1().min_h_0().child(this.list(cx)).child(this.preview(cx));
     return root

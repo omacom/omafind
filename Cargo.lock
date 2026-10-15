@@ -1885,145 +1885,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dig-app"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "async-channel",
- "dig-client",
- "dig-core",
- "dig-extract",
- "dig-index",
- "dig-setup",
- "gpui-kit",
- "gpui-shell",
- "notify",
- "serde_json",
- "toml 0.9.12+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "dig-cli"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "clap",
- "dig-client",
- "dig-core",
- "dig-embed",
- "dig-index",
- "dig-setup",
- "dig-store",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dig-client"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dig-core"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "jiff",
- "serde",
- "toml 0.9.12+spec-1.1.0",
-]
-
-[[package]]
-name = "dig-embed"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "bindgen",
- "dig-core",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "dig-extract"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-core",
- "image",
- "jiff",
- "kamadak-exif",
- "quick-xml 0.37.5",
- "tempfile",
- "zip",
-]
-
-[[package]]
-name = "dig-index"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-core",
- "dig-embed",
- "dig-extract",
- "dig-store",
- "ignore",
- "serde",
- "tempfile",
-]
-
-[[package]]
-name = "dig-setup"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-client",
- "dig-core",
- "dig-index",
- "serde",
- "sha2 0.11.1",
- "ureq",
-]
-
-[[package]]
-name = "dig-store"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-core",
- "rusqlite",
- "serde",
- "serde_json",
- "sqlite-vec",
- "tempfile",
-]
-
-[[package]]
-name = "digd"
-version = "0.0.1"
-dependencies = [
- "anyhow",
- "dig-client",
- "dig-core",
- "dig-embed",
- "dig-extract",
- "dig-index",
- "dig-store",
- "notify",
- "serde",
- "serde_json",
- "signal-hook",
- "zbus",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5930,6 +5791,146 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "omafind-app"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "async-channel",
+ "gpui-kit",
+ "gpui-shell",
+ "notify",
+ "omafind-client",
+ "omafind-core",
+ "omafind-embed",
+ "omafind-extract",
+ "omafind-index",
+ "omafind-setup",
+ "serde_json",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "omafind-cli"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "omafind-client",
+ "omafind-core",
+ "omafind-embed",
+ "omafind-index",
+ "omafind-setup",
+ "omafind-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "omafind-client"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "omafind-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "omafind-core"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "jiff",
+ "serde",
+ "toml 0.9.12+spec-1.1.0",
+]
+
+[[package]]
+name = "omafind-embed"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "omafind-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "omafind-extract"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "image",
+ "jiff",
+ "kamadak-exif",
+ "omafind-core",
+ "quick-xml 0.37.5",
+ "tempfile",
+ "zip",
+]
+
+[[package]]
+name = "omafind-index"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "ignore",
+ "omafind-core",
+ "omafind-embed",
+ "omafind-extract",
+ "omafind-store",
+ "serde",
+ "tempfile",
+]
+
+[[package]]
+name = "omafind-setup"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "omafind-client",
+ "omafind-core",
+ "omafind-index",
+ "serde",
+ "sha2 0.11.1",
+ "ureq",
+]
+
+[[package]]
+name = "omafind-store"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "omafind-core",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sqlite-vec",
+ "tempfile",
+]
+
+[[package]]
+name = "omafindd"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "notify",
+ "omafind-client",
+ "omafind-core",
+ "omafind-embed",
+ "omafind-extract",
+ "omafind-index",
+ "omafind-store",
+ "serde",
+ "serde_json",
+ "signal-hook",
+ "zbus",
 ]
 
 [[package]]

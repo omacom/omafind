@@ -3,7 +3,7 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
-import { candidates, applySetup, downloadModels, setupProgress } from "dig";
+import { candidates, applySetup, downloadModels, setupProgress } from "omafind";
 import { count } from "./kinds.js";
 
 const CHECK_ON = "\u{f14a}";
@@ -193,11 +193,11 @@ export class Setup {
         }
         case "hyprland": {
           const have = this.installed && this.installed.binding && this.installed.rules;
-          return row(it.row, "SUPER + CTRL + G opens Dig", have ? "Keybinding and window rules are in ~/.config/hypr/dig.lua" : "Adds a keybinding and window rules to ~/.config/hypr/dig.lua", have ? "\u{f00c}" : this.hyprland ? CHECK_ON : CHECK_OFF, (cx) => this.toggle(cx));
+          return row(it.row, "SUPER + CTRL + G opens Omafind", have ? "Keybinding and window rules are in ~/.config/hypr/omafind.lua" : "Adds a keybinding and window rules to ~/.config/hypr/omafind.lua", have ? "\u{f00c}" : this.hyprland ? CHECK_ON : CHECK_OFF, (cx) => this.toggle(cx));
         }
         case "autostart": {
           const have = this.installed && this.installed.autostart;
-          return row(it.row, "Start with the session", have ? "In ~/.config/hypr/dig.lua" : "Keeps the window ready so it opens instantly", have ? "\u{f00c}" : this.autostart ? CHECK_ON : CHECK_OFF, (cx) => this.toggle(cx));
+          return row(it.row, "Start with the session", have ? "In ~/.config/hypr/omafind.lua" : "Keeps the window ready so it opens instantly", have ? "\u{f00c}" : this.autostart ? CHECK_ON : CHECK_OFF, (cx) => this.toggle(cx));
         }
         case "apply": {
           const selected = it.row === this.cursor;
@@ -230,7 +230,7 @@ export class Setup {
       .overflow_hidden()
       .child(
         v_flex().px(12).pt(10).pb(2).gap(4)
-          .child(div().text_size(16).font_medium().text_color(colors.foreground).child(firstRun ? "Set up Dig" : "Settings"))
+          .child(div().text_size(16).font_medium().text_color(colors.foreground).child(firstRun ? "Set up Omafind" : "Settings"))
           .child(div().text_size(12).text_color(colors.muted_foreground).child(this.loading ? "Looking at your folders…" : this.error ? this.error : "Pick what to index. Files never leave this machine.")),
       )
       .child(

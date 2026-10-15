@@ -24,7 +24,7 @@ ffmpeg -loglevel error -y -f lavfi -i "anoisesrc=d=5:c=pink:r=16000" -ac 1 -ar 1
 # for "bowl of pasta".
 fetch() {
   local url
-  url=$(curl -sG 'https://commons.wikimedia.org/w/api.php' -A 'dig-testbed/0.1' \
+  url=$(curl -sG 'https://commons.wikimedia.org/w/api.php' -A 'omafind-testbed/0.1' \
     --data-urlencode "gsrsearch=$2 filetype:bitmap" --data-urlencode 'action=query' \
     --data-urlencode 'generator=search' --data-urlencode 'gsrnamespace=6' --data-urlencode 'gsrlimit=5' \
     --data-urlencode 'prop=imageinfo' --data-urlencode 'iiprop=url|mime' --data-urlencode 'iiurlwidth=1024' \
@@ -36,7 +36,7 @@ for page in sorted(pages.values(), key=lambda p: p.get("index", 99)):
     if info.get("mime") == "image/jpeg":
         print(info["thumburl"]); break')
   [[ -n $url ]] || { echo "no image for: $2" >&2; return 1; }
-  curl -sL -A 'dig-testbed/0.1' -o "$out/img/$1.jpg" "$url"
+  curl -sL -A 'omafind-testbed/0.1' -o "$out/img/$1.jpg" "$url"
   echo "$1.jpg ← $2"
 }
 fetch dog_beach "dog running on the beach"

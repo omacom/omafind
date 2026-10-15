@@ -1,16 +1,16 @@
 # Maintainer: Taha Nejad <paprikataha@gmail.com>
-# Dig: local semantic file search for Omarchy. Builds the Rust workspace and bundles llama.cpp's own prebuilt
-# release (no compiling of llama.cpp): the libraries land in /usr/lib/dig/engine, the headers only serve the build.
-pkgname=dig
+# Omafind: local semantic file search for Omarchy. Builds the Rust workspace and bundles llama.cpp's own prebuilt
+# release (no compiling of llama.cpp): the libraries land in /usr/lib/omafind/engine, the headers only serve the build.
+pkgname=omafind
 pkgver=0.0.1
 pkgrel=1
 pkgdesc="Local, on-device semantic search over your files (photos, PDFs, documents, audio, video)"
 arch=(x86_64 aarch64)
-url="https://github.com/tahayvr/dig"
+url="https://github.com/omacom/omafind"
 license=(MIT)
 _llama=b11635
 depends=(gcc-libs glibc vulkan-icd-loader ffmpeg ffmpegthumbnailer poppler tesseract tesseract-data-eng wl-clipboard libxkbcommon)
-optdepends=('pandoc-cli: .doc and .rtf documents' 'mpv: open recordings at a moment' 'evince: open PDFs at a page' 'imv: open photos' 'gum: prompts in dig setup')
+optdepends=('pandoc-cli: .doc and .rtf documents' 'mpv: open recordings at a moment' 'evince: open PDFs at a page' 'imv: open photos' 'gum: prompts in omafind setup')
 makedepends=(cargo clang)
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz"
         "llama-$_llama-src.tar.gz::https://github.com/ggml-org/llama.cpp/archive/refs/tags/$_llama.tar.gz")
@@ -34,25 +34,25 @@ prepare() {
 
 build() {
   cd "$pkgname-$pkgver"
-  export DIG_LLAMA_DIR="$srcdir/engine" DIG_LLAMA_RPATH=/usr/lib/dig/engine
+  export OMAFIND_LLAMA_DIR="$srcdir/engine" OMAFIND_LLAMA_RPATH=/usr/lib/omafind/engine
   export CARGO_TARGET_DIR=target
   cargo build --release --frozen
 }
 
 check() {
   cd "$pkgname-$pkgver"
-  export DIG_LLAMA_DIR="$srcdir/engine"
-  cargo test --release --frozen -p dig-core -p dig-store -p dig-extract -p dig-index
+  export OMAFIND_LLAMA_DIR="$srcdir/engine"
+  cargo test --release --frozen -p omafind-core -p omafind-store -p omafind-extract -p omafind-index
 }
 
 package() {
   cd "$pkgname-$pkgver"
-  install -Dm755 target/release/dig target/release/digd target/release/dig-app -t "$pkgdir/usr/bin/"
-  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js -t "$pkgdir/usr/share/dig/ui/"
-  install -Dm644 packaging/dig.lua -t "$pkgdir/usr/share/dig/hypr/"
-  install -Dm644 systemd/digd.service -t "$pkgdir/usr/lib/systemd/user/"
-  install -Dm644 packaging/dig.desktop -t "$pkgdir/usr/share/applications/"
-  install -dm755 "$pkgdir/usr/lib/dig/engine"
-  cp -a "$srcdir/engine/lib/." "$pkgdir/usr/lib/dig/engine/"
+  install -Dm755 target/release/omafind target/release/omafindd target/release/omafind-app -t "$pkgdir/usr/bin/"
+  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js -t "$pkgdir/usr/share/omafind/ui/"
+  install -Dm644 packaging/omafind.lua -t "$pkgdir/usr/share/omafind/hypr/"
+  install -Dm644 systemd/omafindd.service -t "$pkgdir/usr/lib/systemd/user/"
+  install -Dm644 packaging/omafind.desktop -t "$pkgdir/usr/share/applications/"
+  install -dm755 "$pkgdir/usr/lib/omafind/engine"
+  cp -a "$srcdir/engine/lib/." "$pkgdir/usr/lib/omafind/engine/"
   install -Dm644 "$srcdir/llama-$_llama/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.llama.cpp"
 }

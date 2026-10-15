@@ -1,0 +1,22 @@
+[package]
+name = "omafind-cli"
+description = "The `omafind` command: index folders and search them from the terminal."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "omafind"
+path = "src/main.rs"
+
+[dependencies]
+omafind-core = { path = "../omafind-core" }
+omafind-embed = { path = "../omafind-embed" }
+omafind-index = { path = "../omafind-index" }
+omafind-store = { path = "../omafind-store" }
+omafind-client = { path = "../omafind-client" }
+omafind-setup = { path = "../omafind-setup" }
+anyhow.workspace = true
+serde_json.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+serde.workspace = true

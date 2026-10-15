@@ -1,12 +1,12 @@
 #!/bin/bash
-# Fetches the llama.cpp engine Dig runs on: upstream's own prebuilt release for this machine (no compiler, ~30 MB) plus
-# the matching headers, into ~/.local/share/dig/engine/<tag>-<flavor> with a `current` link that dig-embed's build.rs
+# Fetches the llama.cpp engine Omafind runs on: upstream's own prebuilt release for this machine (no compiler, ~30 MB) plus
+# the matching headers, into ~/.local/share/omafind/engine/<tag>-<flavor> with a `current` link that omafind-embed's build.rs
 # and the binaries use. Nothing is built or patched. A second run with the same tag is a no-op.
 #   scripts/fetch-engine.sh [vulkan|cpu|cuda-12.8|cuda-13.4|rocm-10.0]    (default: vulkan)
 set -euo pipefail
 
 TAG=b11635   # a release with Linux assets for x64 and arm64; ≥ b11584 (no logits buffer for embedding models)
-FLAVOR=${1:-${DIG_ENGINE_FLAVOR:-vulkan}}
+FLAVOR=${1:-${OMAFIND_ENGINE_FLAVOR:-vulkan}}
 case $(uname -m) in
   x86_64) ARCH=x64 ;;
   aarch64) ARCH=arm64 ;;
@@ -21,7 +21,7 @@ suffix=$FLAVOR-$ARCH
 [[ $FLAVOR == cpu ]] && suffix=$ARCH
 asset="llama-$TAG-bin-ubuntu-$suffix.tar.gz"
 
-root="${DIG_ENGINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dig/engine}"
+root="${OMAFIND_ENGINE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/omafind/engine}"
 dest="$root/$TAG-$FLAVOR"
 if [[ -f $dest/VERSION && -f $dest/lib/libllama.so && -f $dest/include/mtmd.h ]]; then
   ln -sfn "$dest" "$root/current"
@@ -29,7 +29,7 @@ if [[ -f $dest/VERSION && -f $dest/lib/libllama.so && -f $dest/include/mtmd.h ]]
   exit 0
 fi
 
-tmp=$(mktemp -d "${TMPDIR:-/tmp}/dig-engine.XXXXXX")
+tmp=$(mktemp -d "${TMPDIR:-/tmp}/omafind-engine.XXXXXX")
 trap 'rm -rf "$tmp"' EXIT
 echo "downloading $asset"
 curl -fL --retry 5 --retry-all-errors -o "$tmp/$asset" "https://github.com/ggml-org/llama.cpp/releases/download/$TAG/$asset"
@@ -40,7 +40,7 @@ else
 fi
 mkdir -p "$tmp/x" && tar xzf "$tmp/$asset" -C "$tmp/x"
 rm -rf "$dest" && mkdir -p "$dest/lib" "$dest/include"
-# The libraries Dig loads (llama, mtmd, ggml and its backend modules); the tools and their helper libs stay out.
+# The libraries Omafind loads (llama, mtmd, ggml and its backend modules); the tools and their helper libs stay out.
 find "$tmp/x" \( -name 'libllama.so*' -o -name 'libmtmd.so*' -o -name 'libggml*.so*' \) ! -name 'libggml-rpc.so' \
   | xargs -I{} cp -a {} "$dest/lib/"
 for f in include/llama.h ggml/include/ggml.h ggml/include/ggml-alloc.h ggml/include/ggml-backend.h \

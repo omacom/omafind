@@ -1,26 +1,26 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/dig-core",
-    "crates/dig-embed",
-    "crates/dig-store",
-    "crates/dig-extract",
-    "crates/dig-index",
-    "crates/dig-client",
-    "crates/dig-setup",
-    "crates/digd",
-    "crates/dig-cli",
-    "crates/dig-app",
+    "crates/omafind-core",
+    "crates/omafind-embed",
+    "crates/omafind-store",
+    "crates/omafind-extract",
+    "crates/omafind-index",
+    "crates/omafind-client",
+    "crates/omafind-setup",
+    "crates/omafindd",
+    "crates/omafind-cli",
+    "crates/omafind-app",
 ]
 
 [workspace.package]
 version = "0.0.1"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/tahayvr/dig"
+repository = "https://github.com/omacom/omafind"
 
 [workspace.dependencies]
-# GPUI Kit / GPUI Shell: a preview (milestone M0), not on crates.io, pinned by revision. All glue lives in dig-app.
+# GPUI Kit / GPUI Shell: a preview (milestone M0), not on crates.io, pinned by revision. All glue lives in omafind-app.
 gpui-kit = { git = "https://github.com/longbridge/gpui-kit", rev = "50dac1cafb34a4d453c92715219c0458d9a4727b" }
 gpui-shell = { git = "https://github.com/longbridge/gpui-kit", rev = "50dac1cafb34a4d453c92715219c0458d9a4727b" }
 anyhow = "1"

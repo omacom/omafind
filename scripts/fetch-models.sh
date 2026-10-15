@@ -1,12 +1,12 @@
 #!/bin/bash
 # Downloads the EmbeddingGemma 2 GGUFs (ggml-org's Q8_0 conversion at one pinned revision) into
-# ~/.local/share/dig/models, resuming partial downloads and checking size and SHA-256 before a file gets its final
+# ~/.local/share/omafind/models, resuming partial downloads and checking size and SHA-256 before a file gets its final
 # name. Reuses a copy in the Hugging Face cache when one is there at the right size.
 set -euo pipefail
 
 REPO=ggml-org/embeddinggemma-2-GGUF
 REVISION=bfcd298762cc34d0357ece5ebdd31791a3a374d8
-MODELS="${DIG_MODELS:-${XDG_DATA_HOME:-$HOME/.local/share}/dig/models}"
+MODELS="${OMAFIND_MODELS:-${XDG_DATA_HOME:-$HOME/.local/share}/omafind/models}"
 # name bytes sha256
 FILES=(
   "embeddinggemma-2-Q8_0.gguf 309855456 2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135"

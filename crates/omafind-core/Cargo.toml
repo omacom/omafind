@@ -1,0 +1,12 @@
+[package]
+name = "omafind-core"
+description = "Shared types, prompts, paths and ranking for Omafind."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+anyhow.workspace = true
+toml = "0.9"
+jiff = "0.2"

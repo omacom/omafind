@@ -1,0 +1,15 @@
+[package]
+name = "omafind-setup"
+description = "The steps of setting Omafind up: model download, folders, the daemon's unit, the Hyprland lines. Shared by `omafind setup` and the window."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+omafind-core = { path = "../omafind-core" }
+omafind-client = { path = "../omafind-client" }
+omafind-index = { path = "../omafind-index" }
+anyhow.workspace = true
+serde.workspace = true
+ureq = "3"
+sha2 = "0.11"

@@ -1,7 +1,7 @@
-# Dig
+# Omafind
 
 Local, on-device semantic file search for [Omarchy](https://omarchy.org). Press `SUPER + CTRL + G`, describe what
-you're looking for, and Dig finds it: *a dog on the beach* finds the photo, *the clause about pets in the lease*
+you're looking for, and Omafind finds it: *a dog on the beach* finds the photo, *the clause about pets in the lease*
 finds the page of the PDF, *where they talk about sleep* finds the moment in the recording. Photos, screenshots (with
 the text on them), PDFs (scans too), documents (txt, md, html, docx, odt, epub), audio, video and, opt-in, code.
 Nothing leaves the machine.
@@ -17,25 +17,25 @@ From this checkout (an AUR package follows):
 ./install.sh
 ```
 
-That builds Dig, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and runs `dig setup`. Setup can also be
+That builds Omafind, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and runs `omafind setup`. Setup can also be
 done in the window itself: the first time it opens it asks which folders to index, downloads the model files
-(865 MB) and adds the keybinding, window rules and autostart line (`~/.config/hypr/dig.lua`). `dig doctor` checks
-everything afterwards; `dig uninstall` takes it all out again. Ctrl+, in the window reopens the settings.
+(865 MB) and adds the keybinding, window rules and autostart line (`~/.config/hypr/omafind.lua`). `omafind doctor` checks
+everything afterwards; `omafind uninstall` takes it all out again. Ctrl+, in the window reopens the settings.
 
 ## Use
 
-- `SUPER + CTRL + G` (or `dig toggle`) shows the search window; `Esc` hides it. `↑ ↓` move, `Enter` opens at the
+- `SUPER + CTRL + G` (or `omafind toggle`) shows the search window; `Esc` hides it. `↑ ↓` move, `Enter` opens at the
   match, `Ctrl + Enter` reveals in the file manager, `Ctrl + C` copies the file, `Tab` cycles the kind filter.
 - A query starting with `code:` searches the code index (`code: retry with backoff`).
-- `dig search "payment declined error"` does the same from a terminal (`--json`, `--kind pdf,doc`).
-- `dig index ~/Pictures ~/Documents --code ~/dev` picks folders; `dig status`, `dig watch`, `dig pause`, `dig resume`.
+- `omafind search "payment declined error"` does the same from a terminal (`--json`, `--kind pdf,doc`).
+- `omafind index ~/Pictures ~/Documents --code ~/dev` picks folders; `omafind status`, `omafind watch`, `omafind pause`, `omafind resume`.
 - New and changed files are searchable a few seconds after they land. Indexing pauses in the power-saver profile
-  (`~/.config/dig/config.toml` has the knobs).
+  (`~/.config/omafind/config.toml` has the knobs).
 
 ## How it works
 
 EmbeddingGemma 2 (text, vision and audio in one 768-dimension space) runs on llama.cpp with Vulkan, CUDA or the CPU.
-`digd` watches the chosen folders, reads what changed (poppler, tesseract, ffmpeg, all already on Omarchy), embeds it
+`omafindd` watches the chosen folders, reads what changed (poppler, tesseract, ffmpeg, all already on Omarchy), embeds it
 in a worker that exits when the queue is empty, and answers searches over a socket: nearest vectors plus exact
-keywords (FTS5), fused and gated so only matches that stand out are shown. `dig-app` is a GPUI Shell window whose UI
+keywords (FTS5), fused and gated so only matches that stand out are shown. `omafind-app` is a GPUI Shell window whose UI
 is a small JavaScript file you can restyle. Developer notes are in [AGENTS.md](AGENTS.md).
