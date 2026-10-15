@@ -2,6 +2,7 @@
 
 pub mod config;
 pub mod paths;
+pub mod query;
 pub mod ranking;
 pub mod types;
 
@@ -60,6 +61,9 @@ mod tests {
         assert_eq!(prompts::query("dog"), "task: search result | query: dog");
         assert_eq!(prompts::document(None, "x"), "title: none | text: x");
         assert_eq!(prompts::document(Some(""), "x"), "title: none | text: x");
-        assert_eq!(prompts::document(Some("Lease"), "x"), "title: Lease | text: x");
+        assert_eq!(
+            prompts::document(Some("Lease"), "x"),
+            "title: Lease | text: x"
+        );
     }
 }

@@ -55,8 +55,15 @@ impl FileKind {
         }
     }
 
-    pub const ALL: [FileKind; 7] =
-        [Self::Screenshot, Self::Image, Self::Pdf, Self::Doc, Self::Audio, Self::Video, Self::Code];
+    pub const ALL: [FileKind; 7] = [
+        Self::Screenshot,
+        Self::Image,
+        Self::Pdf,
+        Self::Doc,
+        Self::Audio,
+        Self::Video,
+        Self::Code,
+    ];
 }
 
 /// One searchable piece of a file.
@@ -170,7 +177,11 @@ impl Locator {
             Self::Seconds(seconds) => {
                 let total = seconds.max(0.0).round() as u64;
                 let (h, m, s) = (total / 3600, total % 3600 / 60, total % 60);
-                if h > 0 { format!("{h}:{m:02}:{s:02}") } else { format!("{m:02}:{s:02}") }
+                if h > 0 {
+                    format!("{h}:{m:02}:{s:02}")
+                } else {
+                    format!("{m:02}:{s:02}")
+                }
             }
             Self::Line(line) => format!("L{line}"),
         }
@@ -217,4 +228,49 @@ pub struct Hit {
     pub similarity: Option<f32>,
     /// Which of the query's words appear in the chunk text or file name.
     pub matched_words: Vec<String>,
+    /// Why this file is here, for the tag on its row.
+    #[serde(default)]
+    pub reason: Reason,
+    /// Modification time, unix seconds.
+    #[serde(default)]
+    pub mtime: i64,
+    #[serde(default)]
+    pub size: i64,
+    /// Near-duplicates folded into this result (the same photo copied, cropped, edited, or a burst), by path.
+    #[serde(default)]
+    pub duplicates: Vec<String>,
+}
+
+/// What matched: the picture, the sound, the meaning of its text, its name, or only some of the words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Reason {
+    Picture,
+    Sound,
+    #[default]
+    Text,
+    Name,
+    Words,
+}
+
+impl Reason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Picture => "picture",
+            Self::Sound => "sound",
+            Self::Text => "text",
+            Self::Name => "name",
+            Self::Words => "words",
+        }
+    }
+
+    pub fn of(chunk: ChunkKind, by_vector: bool) -> Self {
+        match (chunk, by_vector) {
+            (ChunkKind::Name, _) => Self::Name,
+            (ChunkKind::Image | ChunkKind::Frame | ChunkKind::PageImage, true) => Self::Picture,
+            (ChunkKind::Audio, true) => Self::Sound,
+            (_, true) => Self::Text,
+            (_, false) => Self::Words,
+        }
+    }
 }

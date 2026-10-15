@@ -20,8 +20,7 @@ pub const REQUIRE_LINE: &str = "require(\"hypr.dig\") -- dig";
 pub const BINDING: &str = "o.bind(\"SUPER + CTRL + G\", \"Dig\", \"dig toggle\")";
 pub const RULES: &str = "o.window({ class = \"^dig$\" }, { workspace = \"special:dig silent\" })\n\
 o.window({ class = \"^dig$\" }, { float = true })\n\
-o.window({ class = \"^dig$\" }, { center = true })\n\
-o.window({ class = \"^dig$\" }, { size = { 880, 600 } })";
+o.window({ class = \"^dig$\" }, { center = true })";
 pub const AUTOSTART: &str = "o.launch_on_start(\"dig-app\")";
 
 /// What `dig.lua` holds.
@@ -33,7 +32,10 @@ pub struct Parts {
 }
 
 pub fn config_dir() -> PathBuf {
-    dig_core::paths::config_dir().parent().map(|p| p.join("hypr")).unwrap_or_else(|| PathBuf::from("~/.config/hypr"))
+    dig_core::paths::config_dir()
+        .parent()
+        .map(|p| p.join("hypr"))
+        .unwrap_or_else(|| PathBuf::from("~/.config/hypr"))
 }
 
 fn dig_lua() -> PathBuf {
@@ -46,7 +48,12 @@ fn hyprland_lua() -> PathBuf {
 
 /// Which parts are installed right now (the file's contents, and only if `hyprland.lua` loads it).
 pub fn installed() -> Parts {
-    let required = std::fs::read_to_string(hyprland_lua()).map(|t| t.lines().any(|l| l.trim() == REQUIRE_LINE || l.trim() == "require(\"hypr.dig\")")).unwrap_or(false);
+    let required = std::fs::read_to_string(hyprland_lua())
+        .map(|t| {
+            t.lines()
+                .any(|l| l.trim() == REQUIRE_LINE || l.trim() == "require(\"hypr.dig\")")
+        })
+        .unwrap_or(false);
     if !required {
         return Parts::default();
     }
@@ -61,9 +68,15 @@ pub fn installed() -> Parts {
 /// Writes `dig.lua` with the parts wanted (keeping parts already there) and makes sure it is required.
 pub fn install(wanted: Parts) -> Result<bool> {
     let before = installed();
-    let parts = Parts { binding: wanted.binding || before.binding, rules: wanted.rules || before.rules, autostart: wanted.autostart || before.autostart };
+    let parts = Parts {
+        binding: wanted.binding || before.binding,
+        rules: wanted.rules || before.rules,
+        autostart: wanted.autostart || before.autostart,
+    };
     remove_legacy_lines()?;
-    let mut text = String::from("-- Dig: written by `dig setup`; `dig uninstall` removes it. Edit freely, Dig only adds what is missing.\n");
+    let mut text = String::from(
+        "-- Dig: written by `dig setup`; `dig uninstall` removes it. Edit freely, Dig only adds what is missing.\n",
+    );
     if parts.binding {
         text.push_str("\n-- Show or hide the search window.\n");
         text.push_str(BINDING);
@@ -83,12 +96,16 @@ pub fn install(wanted: Parts) -> Result<bool> {
     let existing = std::fs::read_to_string(dig_lua()).unwrap_or_default();
     let mut changed = false;
     if existing != text {
-        std::fs::write(dig_lua(), &text).with_context(|| format!("writing {}", dig_lua().display()))?;
+        std::fs::write(dig_lua(), &text)
+            .with_context(|| format!("writing {}", dig_lua().display()))?;
         changed = true;
     }
     let hypr = hyprland_lua();
     let mut main = std::fs::read_to_string(&hypr).unwrap_or_default();
-    if !main.lines().any(|l| l.trim() == REQUIRE_LINE || l.trim() == "require(\"hypr.dig\")") {
+    if !main
+        .lines()
+        .any(|l| l.trim() == REQUIRE_LINE || l.trim() == "require(\"hypr.dig\")")
+    {
         if !main.is_empty() && !main.ends_with('\n') {
             main.push('\n');
         }
@@ -106,8 +123,13 @@ fn remove_legacy_lines() -> Result<Vec<PathBuf>> {
     let mut touched = Vec::new();
     for file in ["bindings.lua", "windows.lua", "autostart.lua"] {
         let path = config_dir().join(file);
-        let Ok(text) = std::fs::read_to_string(&path) else { continue };
-        let kept: Vec<&str> = text.lines().filter(|l| !(l.contains(MARKER) && l.contains("dig"))).collect();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|l| !(l.contains(MARKER) && l.contains("dig")))
+            .collect();
         if kept.len() != text.lines().count() {
             std::fs::write(&path, format!("{}\n", kept.join("\n")))?;
             touched.push(path);
@@ -125,7 +147,10 @@ pub fn uninstall() -> Result<Vec<PathBuf>> {
     }
     let hypr = hyprland_lua();
     if let Ok(text) = std::fs::read_to_string(&hypr) {
-        let kept: Vec<&str> = text.lines().filter(|l| !(l.contains("hypr.dig") || l.contains("-- Dig: search your files"))).collect();
+        let kept: Vec<&str> = text
+            .lines()
+            .filter(|l| !(l.contains("hypr.dig") || l.contains("-- Dig: search your files")))
+            .collect();
         if kept.len() != text.lines().count() {
             std::fs::write(&hypr, format!("{}\n", kept.join("\n")))?;
             touched.push(hypr);

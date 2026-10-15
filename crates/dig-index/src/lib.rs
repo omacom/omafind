@@ -9,4 +9,6 @@ pub mod survey;
 
 pub use crawler::{Candidate, Root, crawl};
 pub use indexer::{Event, Indexer};
-pub use search::{SearchOptions, code_query, search};
+pub use search::{
+    Answer, SearchOptions, Timings, code_query, hits_for, plan, prompted, rank, search, similar,
+};

@@ -28,8 +28,16 @@ fn hf_snapshot() -> PathBuf {
     let hub = std::env::var_os("HF_HUB_CACHE")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HF_HOME").map(|h| PathBuf::from(h).join("hub")))
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".cache/huggingface/hub"));
-    hub.join(format!("models--{}", dig_core::model::REPOSITORY.replace('/', "--"))).join("snapshots").join(dig_core::model::REVISION)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(".cache/huggingface/hub")
+        });
+    hub.join(format!(
+        "models--{}",
+        dig_core::model::REPOSITORY.replace('/', "--")
+    ))
+    .join("snapshots")
+    .join(dig_core::model::REVISION)
 }
 
 /// Whether `file` is in `dir` already.
@@ -40,7 +48,12 @@ pub fn present(dir: &Path, file: &ModelFile) -> bool {
 /// Fetches `file` into `dir` unless it is there, reporting progress on stderr.
 pub fn fetch(dir: &Path, file: &ModelFile) -> Result<()> {
     fetch_with(dir, file, &mut |done, total| {
-        eprint!("\r{}: {:>3}% of {} MB   ", file.name, done * 100 / total.max(1), total / 1_000_000);
+        eprint!(
+            "\r{}: {:>3}% of {} MB   ",
+            file.name,
+            done * 100 / total.max(1),
+            total / 1_000_000
+        );
     })
 }
 
@@ -53,7 +66,10 @@ pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u6
     std::fs::create_dir_all(dir)?;
     let part = dir.join(format!("{}.part", file.name));
     let cached = hf_snapshot().join(file.name);
-    if std::fs::metadata(&cached).map(|m| m.len() == file.bytes).unwrap_or(false) {
+    if std::fs::metadata(&cached)
+        .map(|m| m.len() == file.bytes)
+        .unwrap_or(false)
+    {
         eprintln!("{}: copying from the Hugging Face cache", file.name);
         std::fs::copy(&cached, &part)?;
     } else {
@@ -61,7 +77,11 @@ pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u6
     }
     let size = std::fs::metadata(&part)?.len();
     if size != file.bytes {
-        bail!("{}: wrong size ({size} bytes, expected {})", file.name, file.bytes);
+        bail!(
+            "{}: wrong size ({size} bytes, expected {})",
+            file.name,
+            file.bytes
+        );
     }
     eprint!("{}: checking…", file.name);
     let got = sha256_of(&part)?;
@@ -75,23 +95,38 @@ pub fn fetch_with(dir: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u6
 }
 
 fn download(part: &Path, file: &ModelFile, progress: &mut dyn FnMut(u64, u64)) -> Result<()> {
-    let url = format!("https://huggingface.co/{}/resolve/{}/{}", dig_core::model::REPOSITORY, dig_core::model::REVISION, file.name);
+    let url = format!(
+        "https://huggingface.co/{}/resolve/{}/{}",
+        dig_core::model::REPOSITORY,
+        dig_core::model::REVISION,
+        file.name
+    );
     let have = std::fs::metadata(part).map(|m| m.len()).unwrap_or(0);
     if have >= file.bytes {
         return Ok(());
     }
-    let agent = ureq::Agent::config_builder().timeout_global(None).build().new_agent();
+    let agent = ureq::Agent::config_builder()
+        .timeout_global(None)
+        .build()
+        .new_agent();
     let mut request = agent.get(&url);
     if have > 0 {
         request = request.header("Range", &format!("bytes={have}-"));
     }
-    let response = request.call().with_context(|| format!("downloading {}", file.name))?;
+    let response = request
+        .call()
+        .with_context(|| format!("downloading {}", file.name))?;
     let status = response.status().as_u16();
     let resume = status == 206;
     if !(status == 200 || resume) {
         bail!("{}: HTTP {status}", file.name);
     }
-    let mut out = std::fs::OpenOptions::new().create(true).append(resume).write(true).truncate(!resume).open(part)?;
+    let mut out = std::fs::OpenOptions::new()
+        .create(true)
+        .append(resume)
+        .write(true)
+        .truncate(!resume)
+        .open(part)?;
     let mut done = if resume { have } else { 0 };
     let mut body = response.into_body().into_reader();
     let mut buffer = vec![0u8; 1 << 20];
@@ -123,5 +158,9 @@ fn sha256_of(path: &Path) -> Result<String> {
         }
         hasher.update(&buffer[..n]);
     }
-    Ok(hasher.finalize().iter().map(|b| format!("{b:02x}")).collect())
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }

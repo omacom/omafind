@@ -24,7 +24,10 @@ pub enum Msg {
     Crawl,
     Pause,
     Resume,
-    SetRoots { folders: Vec<PathBuf>, code: Vec<PathBuf> },
+    SetRoots {
+        folders: Vec<PathBuf>,
+        code: Vec<PathBuf>,
+    },
     Power(PowerState),
     Worker(Line),
     WorkerExited,
@@ -51,7 +54,8 @@ pub struct State {
 
 impl State {
     fn power_ok(&self) -> bool {
-        !(self.config.power.pause_in_power_saver && self.power.power_saver) && !(self.config.power.wait_for_ac && self.power.on_battery)
+        !(self.config.power.pause_in_power_saver && self.power.power_saver)
+            && !(self.config.power.wait_for_ac && self.power.on_battery)
     }
 
     pub fn state_name(&self) -> &'static str {
@@ -80,7 +84,39 @@ pub fn code_index_path(index_path: &std::path::Path) -> PathBuf {
 pub fn status(shared: &Shared, store: &Store, searcher: &Searcher) -> Result<Status> {
     let state = shared.state.lock().unwrap().clone();
     let stats = store.stats()?;
-    let code = Store::open(&code_index_path(&searcher.index_path)).and_then(|s| s.stats()).unwrap_or_default();
+    let code = Store::open(&code_index_path(&searcher.index_path))
+        .and_then(|s| s.stats())
+        .unwrap_or_default();
+    let mut kinds: Vec<(dig_core::FileKind, i64, i64)> = Vec::new();
+    for (kind, done, total) in stats.progress.iter().chain(&code.progress) {
+        let Some(kind) = dig_core::FileKind::parse(kind) else {
+            continue;
+        };
+        match kinds.iter_mut().find(|(k, _, _)| *k == kind) {
+            Some(entry) => {
+                entry.1 += done;
+                entry.2 += total;
+            }
+            None => kinds.push((kind, *done, *total)),
+        }
+    }
+    kinds.sort_by_key(|(k, _, _)| k.priority());
+    let pending = stats.pending + code.pending;
+    let done = stats.indexed + stats.failed + code.indexed + code.failed;
+    let eta_seconds = {
+        static RUN: Mutex<Option<(Instant, i64)>> = Mutex::new(None);
+        let mut run = RUN.lock().unwrap();
+        if pending == 0 {
+            *run = None;
+            None
+        } else {
+            let (since, at) = *run.get_or_insert((Instant::now(), done));
+            let elapsed = since.elapsed().as_secs_f64();
+            let rate = (done - at) as f64 / elapsed.max(1e-3);
+            (elapsed > 20.0 && rate > 0.0).then(|| pending as f64 / rate)
+        }
+    };
+    let (vectors_in_memory, vectors_bytes) = searcher.vectors_loaded();
     Ok(Status {
         version: env!("CARGO_PKG_VERSION").into(),
         roots: state.roots.clone(),
@@ -98,6 +134,10 @@ pub fn status(shared: &Shared, store: &Store, searcher: &Searcher) -> Result<Sta
         worker_running: state.worker_running,
         llama_version: store.get_meta("llama_version")?.unwrap_or_default(),
         vector_version: store.vector_version()?,
+        kinds,
+        eta_seconds,
+        vectors_in_memory,
+        vectors_bytes,
     })
 }
 
@@ -124,27 +164,54 @@ struct Coordinator {
 
 pub fn main() -> Result<()> {
     let config = Config::load()?;
-    let index_path = std::env::var_os("DIG_INDEX").map(PathBuf::from).unwrap_or_else(dig_core::paths::index_path);
+    let index_path = std::env::var_os("DIG_INDEX")
+        .map(PathBuf::from)
+        .unwrap_or_else(dig_core::paths::index_path);
     let code_index_path = code_index_path(&index_path);
     let store = Store::open(&index_path)?;
     let code_store = Store::open(&code_index_path)?;
     for s in [&store, &code_store] {
         if s.vector_version()? != dig_core::model::VECTOR_VERSION {
-            crate::log!("vectors {} → {}: embedding everything again", s.vector_version()?, dig_core::model::VECTOR_VERSION);
+            crate::log!(
+                "vectors {} → {}: embedding everything again",
+                s.vector_version()?,
+                dig_core::model::VECTOR_VERSION
+            );
             s.reset_all()?;
-            s.set_meta("vector_version", &dig_core::model::VECTOR_VERSION.to_string())?;
+            s.set_meta(
+                "vector_version",
+                &dig_core::model::VECTOR_VERSION.to_string(),
+            )?;
         }
     }
     let shared = Arc::new(Shared::default());
     let cpu = config.search.device == "cpu";
-    let searcher = Searcher::new(index_path.clone(), code_index_path, cpu, config.search.unload_after_minutes)?;
+    let searcher = Searcher::new(
+        index_path.clone(),
+        code_index_path,
+        cpu,
+        config.search.unload_after_minutes,
+    )?;
     let (tx, rx) = channel::<Msg>();
 
     // Roots: the config's, else what the store remembers from `dig index`.
-    let mut roots: Vec<Root> = config.folders().into_iter().map(|path| Root { path, code: false }).collect();
-    roots.extend(config.code_roots().into_iter().map(|path| Root { path, code: true }));
+    let mut roots: Vec<Root> = config
+        .folders()
+        .into_iter()
+        .map(|path| Root { path, code: false })
+        .collect();
+    roots.extend(
+        config
+            .code_roots()
+            .into_iter()
+            .map(|path| Root { path, code: true }),
+    );
     if roots.is_empty() {
-        roots = store.roots()?.into_iter().map(|(path, code)| Root { path, code }).collect();
+        roots = store
+            .roots()?
+            .into_iter()
+            .map(|(path, code)| Root { path, code })
+            .collect();
     }
     {
         let mut state = shared.state.lock().unwrap();
@@ -154,24 +221,51 @@ pub fn main() -> Result<()> {
     }
 
     // Threads: the socket server, the power watcher, signals.
-    crate::server::start(shared.clone(), searcher.clone(), tx.clone(), index_path.clone())?;
+    crate::server::start(
+        shared.clone(),
+        searcher.clone(),
+        tx.clone(),
+        index_path.clone(),
+    )?;
     {
         let tx = tx.clone();
-        std::thread::Builder::new().name("dig-power".into()).spawn(move || crate::power::watch(tx))?;
+        std::thread::Builder::new()
+            .name("dig-power".into())
+            .spawn(move || crate::power::watch(tx))?;
     }
     {
         let tx = tx.clone();
-        let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT, signal_hook::consts::SIGHUP])?;
-        std::thread::Builder::new().name("dig-signals".into()).spawn(move || {
-            for _ in signals.forever() {
-                let _ = tx.send(Msg::Shutdown);
-            }
-        })?;
+        let mut signals = signal_hook::iterator::Signals::new([
+            signal_hook::consts::SIGTERM,
+            signal_hook::consts::SIGINT,
+            signal_hook::consts::SIGHUP,
+        ])?;
+        std::thread::Builder::new()
+            .name("dig-signals".into())
+            .spawn(move || {
+                for _ in signals.forever() {
+                    let _ = tx.send(Msg::Shutdown);
+                }
+            })?;
     }
 
-    let mut coordinator = Coordinator { shared, searcher, store, code_store, worker: None, tx: tx.clone(), watcher: None, last_status: Instant::now() };
+    let mut coordinator = Coordinator {
+        shared,
+        searcher,
+        store,
+        code_store,
+        worker: None,
+        tx: tx.clone(),
+        watcher: None,
+        last_status: Instant::now(),
+    };
     coordinator.watch_roots();
-    crate::log!("digd {} up: {} roots, index {}", env!("CARGO_PKG_VERSION"), roots.len(), dig_core::paths::tilde(&index_path));
+    crate::log!(
+        "digd {} up: {} roots, index {}",
+        env!("CARGO_PKG_VERSION"),
+        roots.len(),
+        dig_core::paths::tilde(&index_path)
+    );
     let _ = tx.send(Msg::Crawl);
     coordinator.run(rx)
 }
@@ -197,7 +291,11 @@ impl Coordinator {
                         changed
                     };
                     if changed {
-                        crate::log!("power: battery {} power-saver {}", power.on_battery, power.power_saver);
+                        crate::log!(
+                            "power: battery {} power-saver {}",
+                            power.on_battery,
+                            power.power_saver
+                        );
                         self.apply_gate();
                         self.send_status()?;
                     }
@@ -228,7 +326,15 @@ impl Coordinator {
     }
 
     fn watch_roots(&mut self) {
-        let roots: Vec<PathBuf> = self.shared.state.lock().unwrap().roots.iter().map(|r| r.path.clone()).collect();
+        let roots: Vec<PathBuf> = self
+            .shared
+            .state
+            .lock()
+            .unwrap()
+            .roots
+            .iter()
+            .map(|r| r.path.clone())
+            .collect();
         self.watcher = None;
         match crate::watcher::start(roots, self.tx.clone()) {
             Ok(watcher) => self.watcher = Some(watcher),
@@ -237,11 +343,25 @@ impl Coordinator {
     }
 
     fn set_roots(&mut self, folders: Vec<PathBuf>, code: Vec<PathBuf>) -> Result<()> {
-        let mut roots: Vec<Root> = folders.into_iter().map(|path| Root { path, code: false }).collect();
+        let mut roots: Vec<Root> = folders
+            .into_iter()
+            .map(|path| Root { path, code: false })
+            .collect();
         roots.extend(code.into_iter().map(|path| Root { path, code: true }));
         {
             let mut state = self.shared.state.lock().unwrap();
-            state.config.set_folders(&roots.iter().filter(|r| !r.code).map(|r| r.path.clone()).collect::<Vec<_>>(), &roots.iter().filter(|r| r.code).map(|r| r.path.clone()).collect::<Vec<_>>());
+            state.config.set_folders(
+                &roots
+                    .iter()
+                    .filter(|r| !r.code)
+                    .map(|r| r.path.clone())
+                    .collect::<Vec<_>>(),
+                &roots
+                    .iter()
+                    .filter(|r| r.code)
+                    .map(|r| r.path.clone())
+                    .collect::<Vec<_>>(),
+            );
             if let Err(error) = state.config.save() {
                 crate::log!("can't save config: {error:#}");
             }
@@ -257,7 +377,11 @@ impl Coordinator {
             state.roots = roots.clone();
         }
         for root in &roots {
-            let store = if root.code { &self.code_store } else { &self.store };
+            let store = if root.code {
+                &self.code_store
+            } else {
+                &self.store
+            };
             store.add_root(&root.path, root.code)?;
         }
         self.watch_roots();
@@ -266,7 +390,8 @@ impl Coordinator {
 
     fn set_paused(&mut self, paused: bool) -> Result<()> {
         self.shared.state.lock().unwrap().paused = paused;
-        self.store.set_meta("paused", if paused { "1" } else { "0" })?;
+        self.store
+            .set_meta("paused", if paused { "1" } else { "0" })?;
         self.apply_gate();
         self.send_status()
     }
@@ -278,7 +403,9 @@ impl Coordinator {
             !state.paused && state.power_ok()
         };
         if let Some(worker) = &mut self.worker {
-            let _ = worker.stdin.write_all(if may_run { b"resume\n" } else { b"pause\n" });
+            let _ = worker
+                .stdin
+                .write_all(if may_run { b"resume\n" } else { b"pause\n" });
         } else if may_run {
             let _ = self.maybe_start_worker();
         }
@@ -293,10 +420,20 @@ impl Coordinator {
         let mut total = 0;
         let mut pending = 0;
         for root in &roots {
-            let (candidates, _) = crawl(&dig_index::Root { path: root.path.clone(), code: root.code });
-            let store = if root.code { &self.code_store } else { &self.store };
+            let (candidates, _) = crawl(&dig_index::Root {
+                path: root.path.clone(),
+                code: root.code,
+            });
+            let store = if root.code {
+                &self.code_store
+            } else {
+                &self.store
+            };
             let mut keep = HashSet::with_capacity(candidates.len());
-            for c in candidates.iter().filter(|c| !dig_core::config::is_excluded(&c.path, &excludes)) {
+            for c in candidates
+                .iter()
+                .filter(|c| !dig_core::config::is_excluded(&c.path, &excludes))
+            {
                 let (_, changed) = store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
                 pending += changed as usize;
                 keep.insert(c.path.clone());
@@ -304,7 +441,11 @@ impl Coordinator {
             total += keep.len();
             store.remove_missing(&root.path, &keep)?;
         }
-        crate::log!("crawled {} roots: {total} files, {pending} to index, {:.1} s", roots.len(), started.elapsed().as_secs_f64());
+        crate::log!(
+            "crawled {} roots: {total} files, {pending} to index, {:.1} s",
+            roots.len(),
+            started.elapsed().as_secs_f64()
+        );
         self.shared.state.lock().unwrap().crawling = false;
         self.maybe_start_worker()?;
         self.send_status()
@@ -321,11 +462,20 @@ impl Coordinator {
             if dig_core::config::is_excluded(&path, &excludes) {
                 continue;
             }
-            let Some(root) = roots.iter().find(|r| path.starts_with(&r.path)) else { continue };
-            let store = if root.code { &self.code_store } else { &self.store };
+            let Some(root) = roots.iter().find(|r| path.starts_with(&r.path)) else {
+                continue;
+            };
+            let store = if root.code {
+                &self.code_store
+            } else {
+                &self.store
+            };
             if path.is_dir() {
                 // A new or renamed folder: its contents in one go.
-                let (candidates, _) = crawl(&dig_index::Root { path: path.clone(), code: root.code });
+                let (candidates, _) = crawl(&dig_index::Root {
+                    path: path.clone(),
+                    code: root.code,
+                });
                 let mut keep = HashSet::new();
                 for c in &candidates {
                     store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
@@ -337,13 +487,25 @@ impl Coordinator {
             }
             match std::fs::metadata(&path) {
                 Ok(meta) if meta.is_file() => {
-                    let inside_code = !root.code && path.parent().is_some_and(|p| p.ancestors().take_while(|a| a.starts_with(&root.path)).any(dig_index::rules::is_code_project));
+                    let inside_code = !root.code
+                        && path.parent().is_some_and(|p| {
+                            p.ancestors()
+                                .take_while(|a| a.starts_with(&root.path))
+                                .any(dig_index::rules::is_code_project)
+                        });
                     let kind = if root.code {
                         dig_extract::code::is_code(&path).then_some(dig_core::FileKind::Code)
                     } else {
-                        dig_extract::classify::classify(&path).filter(|k| dig_extract::supported(*k))
+                        dig_extract::classify::classify(&path)
+                            .filter(|k| dig_extract::supported(*k))
                     };
-                    let hidden = path.strip_prefix(&root.path).ok().is_some_and(|rel| rel.components().any(|c| c.as_os_str().to_str().is_some_and(|s| s.starts_with('.') && s.len() > 1)));
+                    let hidden = path.strip_prefix(&root.path).ok().is_some_and(|rel| {
+                        rel.components().any(|c| {
+                            c.as_os_str()
+                                .to_str()
+                                .is_some_and(|s| s.starts_with('.') && s.len() > 1)
+                        })
+                    });
                     let wanted = kind.is_some_and(|k| {
                         !dig_index::rules::is_secret(&path)
                             && dig_index::rules::size_ok(k, meta.len())
@@ -352,7 +514,12 @@ impl Coordinator {
                     });
                     match (wanted, kind) {
                         (true, Some(kind)) => {
-                            let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
+                            let mtime = meta
+                                .modified()
+                                .ok()
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
                             store.see_file(&path, mtime, meta.len() as i64, kind)?;
                             touched += 1;
                         }
@@ -364,9 +531,13 @@ impl Coordinator {
                 _ => {
                     // Gone (or not a plain file any more): the path itself, and everything that was under it when it
                     // was a folder.
-                    let removed = store.remove_file(&path)? as usize + store.remove_missing(&path, &HashSet::new())?;
+                    let removed = store.remove_file(&path)? as usize
+                        + store.remove_missing(&path, &HashSet::new())?;
                     if removed > 0 {
-                        crate::log!("{} gone: {removed} files dropped", dig_core::paths::tilde(&path));
+                        crate::log!(
+                            "{} gone: {removed} files dropped",
+                            dig_core::paths::tilde(&path)
+                        );
                         touched += removed;
                     }
                 }
@@ -405,17 +576,19 @@ impl Coordinator {
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let tx = self.tx.clone();
-        std::thread::Builder::new().name("dig-worker-io".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if let Ok(parsed) = serde_json::from_str::<Line>(&line) {
-                    if tx.send(Msg::Worker(parsed)).is_err() {
+        std::thread::Builder::new()
+            .name("dig-worker-io".into())
+            .spawn(move || {
+                for line in BufReader::new(stdout).lines() {
+                    let Ok(line) = line else { break };
+                    if let Ok(parsed) = serde_json::from_str::<Line>(&line)
+                        && tx.send(Msg::Worker(parsed)).is_err()
+                    {
                         return;
                     }
                 }
-            }
-            let _ = tx.send(Msg::WorkerExited);
-        })?;
+                let _ = tx.send(Msg::WorkerExited);
+            })?;
         self.worker = Some(Worker { child, stdin });
         self.shared.state.lock().unwrap().worker_running = true;
         crate::log!("worker started");
@@ -424,20 +597,38 @@ impl Coordinator {
 
     fn worker_line(&mut self, line: Line) -> Result<()> {
         match line {
-            Line::Ready { seconds, device } => crate::log!("worker ready in {seconds:.1} s ({device})"),
+            Line::Ready { seconds, device } => {
+                crate::log!("worker ready in {seconds:.1} s ({device})")
+            }
             Line::Reading { path, .. } => {
                 self.shared.state.lock().unwrap().current = Some(path);
                 self.send_status_throttled()?;
             }
             Line::Indexed { path, kind, .. } => {
-                broadcast(&self.shared, Event::Indexed { path: PathBuf::from(path), kind: dig_core::FileKind::parse(&kind).unwrap_or(dig_core::FileKind::Doc) });
+                broadcast(
+                    &self.shared,
+                    Event::Indexed {
+                        path: PathBuf::from(path),
+                        kind: dig_core::FileKind::parse(&kind).unwrap_or(dig_core::FileKind::Doc),
+                    },
+                );
                 self.send_status_throttled()?;
             }
             Line::Failed { path, error } => {
                 crate::log!("failed {path}: {error}");
-                broadcast(&self.shared, Event::Failed { path: PathBuf::from(path), error });
+                broadcast(
+                    &self.shared,
+                    Event::Failed {
+                        path: PathBuf::from(path),
+                        error,
+                    },
+                );
             }
-            Line::Done { indexed, failed, seconds } => {
+            Line::Done {
+                indexed,
+                failed,
+                seconds,
+            } => {
                 crate::log!("worker done: {indexed} indexed, {failed} failed, {seconds:.1} s");
                 self.shared.state.lock().unwrap().current = None;
             }

@@ -57,12 +57,20 @@ fn coefficients(in_size: usize, out_size: usize) -> (Vec<usize>, Vec<i32>, usize
         let first = ((center - support + 0.5) as i64).max(0) as usize;
         let count = (((center + support + 0.5) as i64) as usize).min(in_size) - first;
         let mut total = 0.0;
-        for x in 0..size {
-            row[x] = if x < count { filter(((x + first) as f64 - center + 0.5) / filter_scale) } else { 0.0 };
-            total += row[x];
+        for (x, slot) in row.iter_mut().enumerate() {
+            *slot = if x < count {
+                filter(((x + first) as f64 - center + 0.5) / filter_scale)
+            } else {
+                0.0
+            };
+            total += *slot;
         }
         for x in 0..size {
-            let weight = if x < count && total != 0.0 { row[x] / total } else { row[x] };
+            let weight = if x < count && total != 0.0 {
+                row[x] / total
+            } else {
+                row[x]
+            };
             let rounding = if weight < 0.0 { -0.5 } else { 0.5 };
             weights[out * size + x] = (weight * (1i64 << PRECISION) as f64 + rounding) as i32;
         }
@@ -83,7 +91,11 @@ fn horizontal(src: &[u8], in_width: usize, rows: usize, out_width: usize) -> Vec
     for y in 0..rows {
         for x in 0..out_width {
             let mut p = (y * in_width + bounds[x * 2]) * 3;
-            let (mut r, mut g, mut b) = (1i32 << (PRECISION - 1), 1i32 << (PRECISION - 1), 1i32 << (PRECISION - 1));
+            let (mut r, mut g, mut b) = (
+                1i32 << (PRECISION - 1),
+                1i32 << (PRECISION - 1),
+                1i32 << (PRECISION - 1),
+            );
             for k in 0..bounds[x * 2 + 1] {
                 let w = weights[x * size + k];
                 r = r.wrapping_add((src[p] as i32).wrapping_mul(w));
@@ -123,7 +135,13 @@ fn vertical(src: &[u8], in_height: usize, row_width: usize, out_height: usize) -
 
 /// Pillow's bicubic resampling of packed RGB (a = −0.5, the kernel widened when shrinking, 22-bit fixed point): what
 /// the reference gets from PIL's Image.resize.
-pub fn resize_bicubic(source: &[u8], width: usize, height: usize, to_width: usize, to_height: usize) -> Vec<u8> {
+pub fn resize_bicubic(
+    source: &[u8],
+    width: usize,
+    height: usize,
+    to_width: usize,
+    to_height: usize,
+) -> Vec<u8> {
     debug_assert_eq!(source.len(), width * height * 3);
     match (to_width != width, to_height != height) {
         (true, true) => {

@@ -7,8 +7,15 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn pkg_config(args: &[&str]) -> Option<String> {
-    let output = Command::new("pkg-config").args(args).arg("llama").output().ok()?;
-    output.status.success().then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    let output = Command::new("pkg-config")
+        .args(args)
+        .arg("llama")
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 fn fetched_engine() -> Option<PathBuf> {
@@ -25,22 +32,46 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DIG_LLAMA_DIR");
 
     // (include dirs, lib dirs, version, lib dir to bake in for loading backends at run time)
-    let prefix = std::env::var_os("DIG_LLAMA_DIR").map(PathBuf::from).or_else(fetched_engine);
-    let (include_dirs, lib_dirs, version): (Vec<PathBuf>, Vec<PathBuf>, String) = if let Some(prefix) = &prefix {
-        let version = std::fs::read_to_string(prefix.join("VERSION")).unwrap_or_else(|_| "custom".into());
-        (vec![prefix.join("include")], vec![prefix.join("lib")], version.trim().to_owned())
+    let prefix = std::env::var_os("DIG_LLAMA_DIR")
+        .map(PathBuf::from)
+        .or_else(fetched_engine);
+    let (include_dirs, lib_dirs, version): (Vec<PathBuf>, Vec<PathBuf>, String) = if let Some(
+        prefix,
+    ) = &prefix
+    {
+        let version =
+            std::fs::read_to_string(prefix.join("VERSION")).unwrap_or_else(|_| "custom".into());
+        (
+            vec![prefix.join("include")],
+            vec![prefix.join("lib")],
+            version.trim().to_owned(),
+        )
     } else if let Some(cflags) = pkg_config(&["--cflags-only-I"]) {
-        let includes = cflags.split_whitespace().filter_map(|f| f.strip_prefix("-I")).map(PathBuf::from).collect();
+        let includes = cflags
+            .split_whitespace()
+            .filter_map(|f| f.strip_prefix("-I"))
+            .map(PathBuf::from)
+            .collect();
         let libs = pkg_config(&["--libs-only-L"])
             .unwrap_or_default()
             .split_whitespace()
             .filter_map(|f| f.strip_prefix("-L"))
             .map(PathBuf::from)
             .collect();
-        (includes, libs, pkg_config(&["--modversion"]).unwrap_or_default())
+        (
+            includes,
+            libs,
+            pkg_config(&["--modversion"]).unwrap_or_default(),
+        )
     } else {
-        println!("cargo:warning=no llama.cpp engine: run scripts/fetch-engine.sh, or set DIG_LLAMA_DIR, or install a llama.cpp package");
-        (vec![PathBuf::from("/usr/include")], vec![], "unknown".into())
+        println!(
+            "cargo:warning=no llama.cpp engine: run scripts/fetch-engine.sh, or set DIG_LLAMA_DIR, or install a llama.cpp package"
+        );
+        (
+            vec![PathBuf::from("/usr/include")],
+            vec![],
+            "unknown".into(),
+        )
     };
 
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
@@ -56,7 +87,9 @@ fn main() {
         builder = builder.clang_arg(format!("-I{}", dir.display()));
         println!("cargo:rerun-if-changed={}", dir.display());
     }
-    let bindings = builder.generate().expect("bindgen over llama.h, mtmd.h and ggml-backend.h");
+    let bindings = builder
+        .generate()
+        .expect("bindgen over llama.h, mtmd.h and ggml-backend.h");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out.join("bindings.rs")).unwrap();
 
@@ -67,7 +100,10 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
     }
     if let Some(rpath) = std::env::var_os("DIG_LLAMA_RPATH") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", rpath.to_string_lossy());
+        println!(
+            "cargo:rustc-link-arg=-Wl,-rpath,{}",
+            rpath.to_string_lossy()
+        );
     }
     println!("cargo:rerun-if-env-changed=DIG_LLAMA_RPATH");
     for name in ["llama", "mtmd", "ggml", "ggml-base"] {
@@ -75,7 +111,10 @@ fn main() {
     }
     // Where ggml's backend modules (libggml-vulkan.so, libggml-cpu-*.so) are, when the engine is a prebuilt
     // directory rather than a package that installed them where ggml looks on its own.
-    let backends = lib_dirs.first().map(|d| d.display().to_string()).unwrap_or_default();
+    let backends = lib_dirs
+        .first()
+        .map(|d| d.display().to_string())
+        .unwrap_or_default();
     println!("cargo:rustc-env=DIG_ENGINE_LIB={backends}");
     println!("cargo:rustc-env=DIG_LLAMA_VERSION={version}");
 }

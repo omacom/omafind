@@ -22,7 +22,41 @@ pub fn socket_path() -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Request {
-    Search { query: String, #[serde(default)] limit: Option<usize>, #[serde(default)] kinds: Vec<FileKind> },
+    /// `quick`: names and keywords only, no model (the first paint while typing). `session`: a newer search from the
+    /// same session makes an older one still waiting for the model answer `superseded` instead.
+    Search {
+        query: String,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        kinds: Vec<FileKind>,
+        #[serde(default)]
+        quick: bool,
+        #[serde(default)]
+        session: Option<String>,
+    },
+    /// Files whose vectors are nearest this chunk's: "more like this". No model needed.
+    Similar {
+        chunk_id: i64,
+        #[serde(default)]
+        limit: Option<usize>,
+        #[serde(default)]
+        code: bool,
+    },
+    /// The window opened a result: remembered for ranking and the empty screen.
+    Opened {
+        path: PathBuf,
+        #[serde(default)]
+        query: Option<String>,
+    },
+    /// Recent searches and recently opened or added files, for the empty screen.
+    Recents,
+    /// A chunk's whole text and its neighbours', for the preview pane.
+    Context {
+        chunk_id: i64,
+        #[serde(default)]
+        code: bool,
+    },
     Status,
     /// Stop indexing until `resume` (the daemon remembers across restarts).
     Pause,
@@ -36,17 +70,67 @@ pub enum Request {
     /// Stream `Event`s until the connection closes.
     Subscribe,
     /// Change the indexed folders (persisted to config).
-    SetRoots { folders: Vec<PathBuf>, #[serde(default)] code: Vec<PathBuf> },
+    SetRoots {
+        folders: Vec<PathBuf>,
+        #[serde(default)]
+        code: Vec<PathBuf>,
+    },
     Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Hits { hits: Vec<Hit>, took_ms: f64 },
+    Hits {
+        hits: Vec<Hit>,
+        took_ms: f64,
+        /// Files per kind in the unfiltered list, for the filter chips.
+        #[serde(default)]
+        counts: Vec<(FileKind, usize)>,
+        /// The filters read out of the query (`in:`, `type:`, dates).
+        #[serde(default)]
+        chips: Vec<dig_core::query::Chip>,
+        #[serde(default)]
+        quick: bool,
+    },
+    /// A newer search of the same session came in first.
+    Superseded,
+    Recents(Recents),
+    Passage(Passage),
     Status(Status),
     Ok,
-    Error { message: String },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Recents {
+    /// Newest first: (query, unix seconds).
+    pub searches: Vec<(String, i64)>,
+    /// Opened most often, recently.
+    pub opened: Vec<Hit>,
+    /// Indexed most recently.
+    pub added: Vec<Hit>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Passage {
+    pub text: String,
+    /// The chunk before and after it in the same file, when there are.
+    pub before: String,
+    pub after: String,
+}
+
+/// One answer to a search, everything the window shows about it.
+#[derive(Debug, Clone, Default)]
+pub struct Reply {
+    pub hits: Vec<Hit>,
+    pub took_ms: f64,
+    pub counts: Vec<(FileKind, usize)>,
+    pub chips: Vec<dig_core::query::Chip>,
+    pub quick: bool,
+    pub superseded: bool,
 }
 
 /// Where indexing stands. Everything the footer of the window shows.
@@ -70,6 +154,17 @@ pub struct Status {
     pub worker_running: bool,
     pub llama_version: String,
     pub vector_version: u32,
+    /// Per kind: (kind, indexed, total), cheap kinds first.
+    #[serde(default)]
+    pub kinds: Vec<(FileKind, i64, i64)>,
+    /// Seconds left at the rate files have been indexed since this run started, once there is a rate.
+    #[serde(default)]
+    pub eta_seconds: Option<f64>,
+    /// Vectors held in memory for searching, and their size.
+    #[serde(default)]
+    pub vectors_in_memory: usize,
+    #[serde(default)]
+    pub vectors_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,8 +180,14 @@ pub enum Event {
     /// Counts changed (a file indexed, a crawl finished, a pause toggled). Carries the whole status so the client
     /// never has to ask.
     Status(Status),
-    Indexed { path: PathBuf, kind: FileKind },
-    Failed { path: PathBuf, error: String },
+    Indexed {
+        path: PathBuf,
+        kind: FileKind,
+    },
+    Failed {
+        path: PathBuf,
+        error: String,
+    },
 }
 
 /// A connection to the daemon.
@@ -99,7 +200,8 @@ impl Client {
     /// Connects, or fails with a message that says the daemon isn't running.
     pub fn connect() -> Result<Self> {
         let path = socket_path();
-        let stream = UnixStream::connect(&path).with_context(|| format!("digd isn't running ({} not open)", path.display()))?;
+        let stream = UnixStream::connect(&path)
+            .with_context(|| format!("digd isn't running ({} not open)", path.display()))?;
         stream.set_read_timeout(Some(Duration::from_secs(120)))?;
         let reader = BufReader::new(stream.try_clone()?);
         Ok(Self { stream, reader })
@@ -121,9 +223,59 @@ impl Client {
         Ok(serde_json::from_str(&answer)?)
     }
 
-    pub fn search(&mut self, query: &str, limit: usize, kinds: Vec<FileKind>) -> Result<(Vec<Hit>, f64)> {
-        match self.request(&Request::Search { query: query.into(), limit: Some(limit), kinds })? {
-            Response::Hits { hits, took_ms } => Ok((hits, took_ms)),
+    pub fn search(
+        &mut self,
+        query: &str,
+        limit: usize,
+        kinds: Vec<FileKind>,
+    ) -> Result<(Vec<Hit>, f64)> {
+        let reply = self.search_with(&Request::Search {
+            query: query.into(),
+            limit: Some(limit),
+            kinds,
+            quick: false,
+            session: None,
+        })?;
+        Ok((reply.hits, reply.took_ms))
+    }
+
+    /// A `Search` or `Similar` request.
+    pub fn search_with(&mut self, request: &Request) -> Result<Reply> {
+        match self.request(request)? {
+            Response::Hits {
+                hits,
+                took_ms,
+                counts,
+                chips,
+                quick,
+            } => Ok(Reply {
+                hits,
+                took_ms,
+                counts,
+                chips,
+                quick,
+                superseded: false,
+            }),
+            Response::Superseded => Ok(Reply {
+                superseded: true,
+                ..Reply::default()
+            }),
+            Response::Error { message } => bail!("{message}"),
+            other => bail!("unexpected answer {other:?}"),
+        }
+    }
+
+    pub fn context(&mut self, chunk_id: i64, code: bool) -> Result<Passage> {
+        match self.request(&Request::Context { chunk_id, code })? {
+            Response::Passage(c) => Ok(c),
+            Response::Error { message } => bail!("{message}"),
+            other => bail!("unexpected answer {other:?}"),
+        }
+    }
+
+    pub fn recents(&mut self) -> Result<Recents> {
+        match self.request(&Request::Recents)? {
+            Response::Recents(r) => Ok(r),
             Response::Error { message } => bail!("{message}"),
             other => bail!("unexpected answer {other:?}"),
         }

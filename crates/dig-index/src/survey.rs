@@ -37,8 +37,14 @@ fn cost(kind: FileKind, size: u64) -> f64 {
 
 pub fn survey(path: &Path, code: bool) -> Survey {
     let started = Instant::now();
-    let mut out = Survey { path: path.to_path_buf(), ..Default::default() };
-    let root = crate::Root { path: path.to_path_buf(), code };
+    let mut out = Survey {
+        path: path.to_path_buf(),
+        ..Default::default()
+    };
+    let root = crate::Root {
+        path: path.to_path_buf(),
+        code,
+    };
     crate::crawler::walk(&root, |candidate| {
         out.files += 1;
         *out.by_kind.entry(candidate.kind).or_insert(0) += 1;
@@ -55,21 +61,47 @@ pub fn survey(path: &Path, code: bool) -> Survey {
 /// Surveys folders side by side (one thread each).
 pub fn survey_all(paths: &[PathBuf], code: bool) -> Vec<Survey> {
     std::thread::scope(|scope| {
-        let handles: Vec<_> = paths.iter().map(|p| scope.spawn(move || survey(p, code))).collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_default()).collect()
+        let handles: Vec<_> = paths
+            .iter()
+            .map(|p| scope.spawn(move || survey(p, code)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_default())
+            .collect()
     })
 }
 
 impl Survey {
     /// `312 photos, 40 documents (about 6 min)`.
     pub fn summary(&self) -> String {
-        let parts: Vec<String> = self.by_kind.iter().map(|(k, n)| format!("{n}{} {}", if self.truncated { "+" } else { "" }, plural(*k, *n))).collect();
+        let parts: Vec<String> = self
+            .by_kind
+            .iter()
+            .map(|(k, n)| {
+                format!(
+                    "{n}{} {}",
+                    if self.truncated { "+" } else { "" },
+                    plural(*k, *n)
+                )
+            })
+            .collect();
         if parts.is_empty() {
             return "nothing to index".into();
         }
         let s = self.seconds;
-        let time = if s < 60.0 { format!("{s:.0} s") } else if s < 3600.0 { format!("{:.0} min", s / 60.0) } else { format!("{:.1} h", s / 3600.0) };
-        format!("{} · about {time}{}", parts.join(", "), if self.truncated { " or more" } else { "" })
+        let time = if s < 60.0 {
+            format!("{s:.0} s")
+        } else if s < 3600.0 {
+            format!("{:.0} min", s / 60.0)
+        } else {
+            format!("{:.1} h", s / 3600.0)
+        };
+        format!(
+            "{} · about {time}{}",
+            parts.join(", "),
+            if self.truncated { " or more" } else { "" }
+        )
     }
 }
 

@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gpui_kit::{App, Hsla, Rgba, px};
 use gpui_kit::base::{Theme, ThemeAppearance};
+use gpui_kit::{App, Hsla, Rgba, px};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Palette {
@@ -33,21 +33,36 @@ pub fn colors_path() -> PathBuf {
 fn hex(value: &str) -> Option<Hsla> {
     let v = value.trim().trim_start_matches('#');
     let (r, g, b) = match v.len() {
-        6 => (u8::from_str_radix(&v[0..2], 16).ok()?, u8::from_str_radix(&v[2..4], 16).ok()?, u8::from_str_radix(&v[4..6], 16).ok()?),
+        6 => (
+            u8::from_str_radix(&v[0..2], 16).ok()?,
+            u8::from_str_radix(&v[2..4], 16).ok()?,
+            u8::from_str_radix(&v[4..6], 16).ok()?,
+        ),
         3 => {
             let d = |i: usize| u8::from_str_radix(&v[i..i + 1].repeat(2), 16).ok();
             (d(0)?, d(1)?, d(2)?)
         }
         _ => return None,
     };
-    Some(Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }.into())
+    Some(
+        Rgba {
+            r: r as f32 / 255.0,
+            g: g as f32 / 255.0,
+            b: b as f32 / 255.0,
+            a: 1.0,
+        }
+        .into(),
+    )
 }
 
 impl Palette {
     /// Reads `colors.toml` (canonical and legacy key names). Missing keys fall back along the ramp.
     pub fn parse(text: &str, light_marker: bool) -> Result<Self> {
         let table: toml::Table = text.parse().context("colors.toml")?;
-        let get = |keys: &[&str]| keys.iter().find_map(|k| table.get(*k).and_then(|v| v.as_str()).and_then(hex));
+        let get = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| table.get(*k).and_then(|v| v.as_str()).and_then(hex))
+        };
         let background = get(&["background", "bg"]).context("no background")?;
         let foreground = get(&["foreground", "fg"]).context("no foreground")?;
         let light = light_marker || table.get("mode").and_then(|v| v.as_str()) == Some("light");
@@ -55,10 +70,17 @@ impl Palette {
         Ok(Self {
             light,
             background,
-            darker_background: get(&["darker_background", "darker_bg", "dark_background", "dark_bg"]).unwrap_or(background),
+            darker_background: get(&[
+                "darker_background",
+                "darker_bg",
+                "dark_background",
+                "dark_bg",
+            ])
+            .unwrap_or(background),
             lighter_background: get(&["lighter_background", "lighter_bg"]).unwrap_or(background),
             foreground,
-            muted_foreground: get(&["light_foreground", "light_fg", "dark_foreground", "dark_fg"]).unwrap_or(foreground),
+            muted_foreground: get(&["light_foreground", "light_fg", "dark_foreground", "dark_fg"])
+                .unwrap_or(foreground),
             accent,
             selection: get(&["selection"]).unwrap_or(mix(background, foreground, 0.08)),
             muted: get(&["muted", "color8"]).unwrap_or(mix(background, foreground, 0.2)),
@@ -67,7 +89,8 @@ impl Palette {
     }
 
     pub fn load() -> Result<Self> {
-        let text = std::fs::read_to_string(colors_path()).with_context(|| format!("reading {}", colors_path().display()))?;
+        let text = std::fs::read_to_string(colors_path())
+            .with_context(|| format!("reading {}", colors_path().display()))?;
         Self::parse(&text, state_dir().join("theme/light.mode").exists())
     }
 
@@ -75,7 +98,11 @@ impl Palette {
     /// text in `foreground`, the selected row `foreground` at 8 % with the title in `accent`, dividers in `muted`.
     pub fn apply(&self, font: &str, cx: &mut App) {
         let theme = Theme::global_mut(cx);
-        theme.appearance = if self.light { ThemeAppearance::Light } else { ThemeAppearance::Dark };
+        theme.appearance = if self.light {
+            ThemeAppearance::Light
+        } else {
+            ThemeAppearance::Dark
+        };
         let c = &mut theme.tokens.colors;
         c.background = self.background;
         c.foreground = self.foreground;
@@ -98,7 +125,14 @@ impl Palette {
         let t = &mut theme.tokens.typography;
         t.sans = font.to_owned().into();
         t.mono = font.to_owned().into();
-        for (style, size) in [(&mut t.xs, 11.0), (&mut t.sm, 12.0), (&mut t.md, 13.0), (&mut t.lg, 15.0), (&mut t.xl, 18.0), (&mut t.mono_md, 13.0)] {
+        for (style, size) in [
+            (&mut t.xs, 11.0),
+            (&mut t.sm, 12.0),
+            (&mut t.md, 13.0),
+            (&mut t.lg, 15.0),
+            (&mut t.xl, 18.0),
+            (&mut t.mono_md, 13.0),
+        ] {
             style.size = px(size);
             style.line_height = px(size * 1.4);
         }
@@ -119,21 +153,35 @@ impl Palette {
     /// The selected row's title: the accent, as in Omarchy's menu, unless it doesn't read on the row (a few
     /// themes pick a dim accent), then the foreground.
     pub fn selected_title(&self) -> Hsla {
-        if contrast(self.accent, self.selected_row()) >= 3.0 { self.accent } else { self.foreground }
+        if contrast(self.accent, self.selected_row()) >= 3.0 {
+            self.accent
+        } else {
+            self.foreground
+        }
     }
 }
 
 /// `a` towards `b` by `t`.
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b): (Rgba, Rgba) = (a.into(), b.into());
-    Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: 1.0 }.into()
+    Rgba {
+        r: a.r + (b.r - a.r) * t,
+        g: a.g + (b.g - a.g) * t,
+        b: a.b + (b.b - a.b) * t,
+        a: 1.0,
+    }
+    .into()
 }
 
 /// Hyprland's `decoration:rounding`, which the Omarchy shell mirrors for its cards. 0 when unknown.
 pub fn hyprland_rounding() -> u32 {
     crate::hypr::command("getoption decoration:rounding")
         .ok()
-        .and_then(|s| s.lines().find_map(|l| l.strip_prefix("int: ")).and_then(|v| v.trim().parse().ok()))
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("int: "))
+                .and_then(|v| v.trim().parse().ok())
+        })
         .unwrap_or(0)
 }
 
@@ -143,7 +191,14 @@ pub fn font_family() -> String {
         .args(["monospace", "-f", "%{family}"])
         .output()
         .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).split(',').next().unwrap_or("").trim().to_owned())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split(',')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_owned()
+        })
         .filter(|f| !f.is_empty())
         .unwrap_or_else(|| "JetBrainsMono Nerd Font".into())
 }
@@ -151,7 +206,13 @@ pub fn font_family() -> String {
 /// WCAG relative luminance.
 fn luminance(color: Hsla) -> f32 {
     let c: Rgba = color.into();
-    let lin = |v: f32| if v <= 0.03928 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) };
+    let lin = |v: f32| {
+        if v <= 0.03928 {
+            v / 12.92
+        } else {
+            ((v + 0.055) / 1.055).powf(2.4)
+        }
+    };
     0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
 }
 
@@ -169,12 +230,20 @@ pub fn watch(on_change: impl Fn() + Send + 'static) -> Result<notify::Recommende
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if let Ok(event) = event {
             // Only writes: reading the file reports access events, and reacting to those would loop forever.
-            if !matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_) | notify::EventKind::Remove(_)) {
+            if !matches!(
+                event.kind,
+                notify::EventKind::Modify(_)
+                    | notify::EventKind::Create(_)
+                    | notify::EventKind::Remove(_)
+            ) {
                 return;
             }
             let relevant = event.paths.iter().any(|p: &PathBuf| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                name == "theme" || name == "theme.name" || name == "colors.toml" || name == "light.mode"
+                name == "theme"
+                    || name == "theme.name"
+                    || name == "colors.toml"
+                    || name == "light.mode"
             });
             if relevant {
                 on_change();
@@ -197,7 +266,8 @@ mod tests {
     /// selected row. The Omarchy checkout is a sibling of this repo; without it the test is skipped.
     #[test]
     fn omarchy_themes_keep_contrast() {
-        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../omarchy-quattro/themes");
+        let themes = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../omarchy-quattro/themes");
         let Ok(entries) = std::fs::read_dir(&themes) else {
             eprintln!("no omarchy checkout at {}: skipped", themes.display());
             return;
@@ -205,14 +275,28 @@ mod tests {
         let mut checked = 0;
         for entry in entries.flatten() {
             let file = entry.path().join("colors.toml");
-            let Ok(text) = std::fs::read_to_string(&file) else { continue };
+            let Ok(text) = std::fs::read_to_string(&file) else {
+                continue;
+            };
             let palette = Palette::parse(&text, entry.path().join("light.mode").exists()).unwrap();
             let text_contrast = contrast(palette.foreground, palette.background);
             let title_contrast = contrast(palette.selected_title(), palette.selected_row());
             let muted_contrast = contrast(palette.muted_foreground, palette.background);
-            assert!(text_contrast >= 4.5, "{}: text {text_contrast:.2}", entry.file_name().to_string_lossy());
-            assert!(title_contrast >= 3.0, "{}: selected title {title_contrast:.2}", entry.file_name().to_string_lossy());
-            assert!(muted_contrast >= 2.5, "{}: muted text {muted_contrast:.2}", entry.file_name().to_string_lossy());
+            assert!(
+                text_contrast >= 4.5,
+                "{}: text {text_contrast:.2}",
+                entry.file_name().to_string_lossy()
+            );
+            assert!(
+                title_contrast >= 3.0,
+                "{}: selected title {title_contrast:.2}",
+                entry.file_name().to_string_lossy()
+            );
+            assert!(
+                muted_contrast >= 2.5,
+                "{}: muted text {muted_contrast:.2}",
+                entry.file_name().to_string_lossy()
+            );
             checked += 1;
         }
         assert!(checked > 5, "only {checked} themes checked");

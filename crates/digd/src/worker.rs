@@ -12,11 +12,28 @@ use dig_store::Store;
 #[derive(serde::Serialize, serde::Deserialize, Debug)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Line {
-    Ready { seconds: f64, device: String },
-    Reading { path: String, kind: String },
-    Indexed { path: String, kind: String, chunks: usize },
-    Failed { path: String, error: String },
-    Done { indexed: usize, failed: usize, seconds: f64 },
+    Ready {
+        seconds: f64,
+        device: String,
+    },
+    Reading {
+        path: String,
+        kind: String,
+    },
+    Indexed {
+        path: String,
+        kind: String,
+        chunks: usize,
+    },
+    Failed {
+        path: String,
+        error: String,
+    },
+    Done {
+        indexed: usize,
+        failed: usize,
+        seconds: f64,
+    },
 }
 
 #[derive(Default)]
@@ -57,26 +74,60 @@ pub fn main() -> Result<()> {
         });
     }
 
-    let index_path = std::env::var_os("DIG_INDEX").map(std::path::PathBuf::from).unwrap_or_else(dig_core::paths::index_path);
+    let index_path = std::env::var_os("DIG_INDEX")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(dig_core::paths::index_path);
     let mut store = Store::open(&index_path)?;
     let mut code_store = Store::open(&crate::daemon::code_index_path(&index_path))?;
     let models = Models::locate(&dig_core::model::dir())?;
     let cpu = config.search.device == "cpu";
     let started = std::time::Instant::now();
-    let mut embedder = Embedder::new(&models, &Options { text_only: false, cpu_only: cpu, ..Options::default() })?;
-    emit(&Line::Ready { seconds: started.elapsed().as_secs_f64(), device: if dig_embed::gpu_found() && !cpu { "gpu".into() } else { "cpu".into() } });
+    let mut embedder = Embedder::new(
+        &models,
+        &Options {
+            text_only: false,
+            cpu_only: cpu,
+            ..Options::default()
+        },
+    )?;
+    emit(&Line::Ready {
+        seconds: started.elapsed().as_secs_f64(),
+        device: if dig_embed::gpu_found() && !cpu {
+            "gpu".into()
+        } else {
+            "cpu".into()
+        },
+    });
     store.set_meta("llama_version", dig_embed::LLAMA_VERSION)?;
 
     let gate_control = control.clone();
     let on_event = |event: Event| {
-            let line = match event {
-                Event::Crawled { .. } => return,
-                Event::Reading { path, kind } => Line::Reading { path: path.to_string_lossy().into_owned(), kind: kind.as_str().into() },
-                Event::Indexed { path, kind, chunks } => Line::Indexed { path: path.to_string_lossy().into_owned(), kind: kind.as_str().into(), chunks },
-                Event::Failed { path, error } => Line::Failed { path: path.to_string_lossy().into_owned(), error },
-                Event::Done { indexed, failed, seconds } => Line::Done { indexed, failed, seconds },
-            };
-            emit(&line);
+        let line = match event {
+            Event::Crawled { .. } => return,
+            Event::Reading { path, kind } => Line::Reading {
+                path: path.to_string_lossy().into_owned(),
+                kind: kind.as_str().into(),
+            },
+            Event::Indexed { path, kind, chunks } => Line::Indexed {
+                path: path.to_string_lossy().into_owned(),
+                kind: kind.as_str().into(),
+                chunks,
+            },
+            Event::Failed { path, error } => Line::Failed {
+                path: path.to_string_lossy().into_owned(),
+                error,
+            },
+            Event::Done {
+                indexed,
+                failed,
+                seconds,
+            } => Line::Done {
+                indexed,
+                failed,
+                seconds,
+            },
+        };
+        emit(&line);
     };
     let gate = move || {
         let (lock, cv) = &*gate_control;
@@ -89,7 +140,12 @@ pub fn main() -> Result<()> {
     loop {
         // The main index first (what people look for most), then code.
         for store in [&mut store, &mut code_store] {
-            let mut indexer = Indexer { store, embedder: &mut embedder, on_event: Box::new(on_event), gate: Box::new(gate.clone()) };
+            let mut indexer = Indexer {
+                store,
+                embedder: &mut embedder,
+                on_event: Box::new(on_event),
+                gate: Box::new(gate.clone()),
+            };
             indexer.index_pending()?;
         }
         // Linger: wait for more work, or go away after a while so the model's memory is freed.

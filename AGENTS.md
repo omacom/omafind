@@ -2,8 +2,10 @@
 
 Dig is local, on-device semantic file search for Omarchy: describe a thing ("dog on the beach", "the clause about
 pets in the lease", "where they talk about sleep") and it finds the photo, PDF page, passage, moment in a recording
-or video, or code. The phase-by-phase brief is `PLAN.md` (kept out of git by `.gitignore`, as is
-`docs/`). Reference checkouts next to this repo: `../omarchy-quattro` (upstream Omarchy, branch `quattro`),
+or video, or code. The review and the roadmap (phases 7–10, progress log) live in the "Dig — architecture review and
+roadmap" doc (claude.ai artifact c3ab6fa1-12a7-4c8c-8408-3570e457aec1); the UI design is the "Dig UI redesign" canvas
+(claude.ai/artifact/FHmvhSzna65LQ5H3ZRBF9M). `PLAN.md` (the original phase 0–6 brief) is retired; `docs/` stays out
+of git. Reference checkouts next to this repo: `../omarchy-quattro` (upstream Omarchy, branch `quattro`),
 `../gpui-kit` (GPUI Kit at the pinned revision).
 
 ## Status
@@ -27,6 +29,15 @@ Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`download
 whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/dig/engine).
 Notes with numbers: `docs/phase-0.md`.
 
+Phase 7 (search speed) and most of 8–9, 2026-10-15: vectors moved out of sqlite-vec into an in-memory int8 matrix
+with a float32 rescore (`dig-store/src/vectors.rs`), schema 2 (migrates schema 1 in place, nothing re-embeds), a
+trigram FTS5 index on file names, a keyword-only quick stage, per-session supersede and a query-vector cache in
+`digd`, recency-first indexing, square thumbnails made while indexing (`dig-extract/src/thumbs.rs`), EXIF capture
+dates (`dig-extract/src/exif.rs`), inline filters (`dig-core/src/query.rs`: `in:`, `type:`, `after:`, `before:`,
+`on:`, "last week"…), frecency, find similar, near-duplicate folding, `dig bench`, `dig status --failed`. The window:
+list + preview pane, photo grid, filter chips with counts, filters as chips inside the field, Ctrl+K actions,
+recents, sized to the monitor on every show (`hypr::fit_window`).
+
 Not done / not verified: the real `dig setup` on this machine (the agent never writes the user's Hyprland config;
 run it yourself), the power-saver pause (polkit), tree-sitter function boundaries for code (whole-line stretches for
 now), a `dig-bin` AUR package from CI releases, the long-file second pass (big PDFs/recordings are capped per file),
@@ -37,14 +48,16 @@ now), a `dig-bin` AUR package from CI releases, the long-file second pass (big P
 ```
 crates/dig-core      prompts, model pins, VECTOR_VERSION; later schema + ranking
 crates/dig-embed     bindgen over the engine's llama.h/mtmd.h, image sizing, Embedder, `embed-spike` binary
-crates/dig-store     SQLite index: files, chunks, vec0 vectors (cosine), external-content FTS5, roots, meta
+crates/dig-store     SQLite index: files, chunks, vectors (int8 + f32 blobs, change log), external-content FTS5 over
+                     chunks, trigram FTS5 over file names, roots, meta, searches/opens history; vectors.rs is the
+                     in-memory matrix (VectorIndex)
 crates/dig-extract   classify by extension; readers → chunks: name, image, passages, pdf pages (+ rendered scans),
                      OCR text, office/html text, audio windows, video frames (ffmpeg); scratch under ~/.cache/dig
 crates/dig-index     rules + crawler (ignore crate, gitignore only inside repos), indexer (rounds, batched texts), search
 crates/dig-client    socket protocol (JSON lines: search, status, pause, resume, reindex, warm, idle, subscribe,
                      set_roots, shutdown) and the client
 crates/digd          daemon: coordinator (daemon.rs), worker child (worker.rs), watcher, power, searcher, server
-crates/dig-cli       `dig index|search|status|pause|resume|watch|toggle|setup|doctor|eval|uninstall`
+crates/dig-cli       `dig index|search|status|pause|resume|watch|toggle|setup|doctor|eval|bench|uninstall`
                      (setup.rs, doctor.rs, eval.rs, download.rs, hypr.rs; through digd when it runs, else in-process)
 systemd/digd.service user unit: Nice=10, IOSchedulingClass=idle, CPUWeight=20, MemoryHigh=3G
 crates/dig-app       GPUI Shell host: window (app id `dig`), `dig` host module (search/thumb/status/open/reveal/
@@ -110,14 +123,33 @@ ffmpeg) with embedding on a 4-thread pool. `embed-spike bench` reproduces the nu
 
 ## Ranking (dig-core::ranking)
 
-Query → prompted embed → KNN top 200 (`vec0`, cosine) + FTS5 top 200 over the query's content words (stopwords
-dropped, OR-joined, BM25). Vector hits are gated by z-score within their modality (≥ 1.5, top 3 always kept).
+The query is parsed first (`dig_core::query`): filters come out, the rest is searched. Query → prompted embed (cached)
+→ int8 scan of the matrix with kind/folder/date filters applied per row, top 400 rescored in float32 → top 200, plus
+FTS5 top 1000 over the query's content words (stopwords dropped, OR-joined, BM25; one query serves both the mixed
+list and a kind filter) and file names holding every word as typed (trigram index, half words too). Vector hits are gated by z-score within their modality (≥ 1.5; the best always kept, the next two only within
+0.04 of it).
 Reciprocal rank fusion (k = 60); a keyword hit counts by the square of the share of query words it holds; every word
-present adds a small bonus. Then per file: best chunk + half the rest, represented by the best content chunk (not
-the file-name chunk). Snippets open where the rarest query words cluster. Measured on the testbed: every query
-ranks its file first; a search is ~50 ms warm.
+present adds a small bonus. Names are a third RRF list. Then per file: best chunk + half the rest, represented by the best content chunk (not
+the file-name chunk); files opened from the window get up to +30 % (frecency, decaying weekly); photos at cosine
+≥ 0.88 to one already listed fold into it (copies, crops, edits, bursts measure ≥ 0.91, different photos ≤ 0.7). Snippets open where the rarest query words cluster. `dig eval` on a testbed copy outside git: recall@1 0.86, @5 0.93 (the `dentist` query's
+file isn't in the testbed; `security deposit returned` ranks 4th because RRF ignores how weak a vector hit is, as
+before the rewrite). `dig bench` at 300k synthetic chunks: quick stage 16 ms, full 29 ms, photo filter 37 ms p50
+(sqlite-vec's scalar scan alone took ~110 ms per 100k).
 
 ## Things that bit us
+
+- **The real daemon and window run on this machine** (`digd.service`, `dig-app` in `special:dig`). AGENTS' old
+  `pkill -x digd` kills the service too, and it stays dead: stop test processes by PID. A test `dig-app` must be told
+  `--ui ui/` (it prefers the installed `~/.local/share/dig/ui`) and `DIG_SOCKET` (the test daemon's socket), and
+  `hyprctl dispatch` by window *address*, not `class:dig`, which also matches the real window.
+- **Driving the window with `wtype`**: Escape hides the workspace and the keyboard goes back to whatever the user
+  was in, so keys typed after it land there. Check `hyprctl activewindow` first; never send Escape in a sequence.
+- **External-content FTS5 and triggers**: a migration that fills a column while its update trigger exists issues
+  `delete` for rows the index never had, and the table is corrupt ("database disk image is malformed"). Fill, then
+  `rebuild`, then create the triggers.
+- The bundled SQLite has no math functions (`pow` fails at prepare time).
+- Every lookup a search makes per result needs an index: `vectors(file_id)` missing made the photo filter 70× slower
+  at 300k chunks. Run `dig bench` after any change to ranking.
 
 - A `.gitignore` in a parent folder (a dotfiles repo in `$HOME` with `*`) would hide everything: the crawler honours
   gitignore only inside git repositories (`require_git(true)`), and inside those only screenshots are read anyway.
@@ -188,7 +220,7 @@ The tool shell has no Wayland env. Before launching anything graphical:
 export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1)
 ```
 
-Then `./target/debug/dig-app --dev &`, `hyprctl clients -j` (class `dig`), `hyprctl dispatch focuswindow class:dig`,
+Then `./target/debug/dig-app --dev --ui $PWD/ui &`, `hyprctl clients -j` (class `dig`), `hyprctl dispatch focuswindow class:dig`,
 `wtype -k Tab; wtype 'query'`, `grim -o eDP-1 shot.png` (3840×2160, scale 1.6), stop with `pkill -x dig-app`. Never
 `pkill -f`: it matches the tool's own shell.
 

@@ -17,7 +17,13 @@ pub fn read(image: &Path) -> Result<String> {
         .output()
         .context("running tesseract")?;
     if !output.status.success() {
-        anyhow::bail!("tesseract: {}", String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("failed"));
+        anyhow::bail!(
+            "tesseract: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("failed")
+        );
     }
     let text = String::from_utf8_lossy(&output.stdout);
     Ok(clean(&text))
@@ -39,6 +45,9 @@ fn clean(text: &str) -> String {
 mod tests {
     #[test]
     fn noise_lines_are_dropped() {
-        assert_eq!(super::clean("Hello world\n|| -- ..\n  a1  \nx"), "Hello world\na1");
+        assert_eq!(
+            super::clean("Hello world\n|| -- ..\n  a1  \nx"),
+            "Hello world\na1"
+        );
     }
 }

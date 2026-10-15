@@ -12,7 +12,11 @@ use anyhow::{Context, Result, bail};
 pub fn read(path: &Path, ext: &str) -> Result<String> {
     match ext {
         "docx" => zipped_xml(path, &["word/document.xml"], &["w:p", "w:tab", "w:br"]),
-        "odt" => zipped_xml(path, &["content.xml"], &["text:p", "text:h", "text:line-break", "text:tab"]),
+        "odt" => zipped_xml(
+            path,
+            &["content.xml"],
+            &["text:p", "text:h", "text:line-break", "text:tab"],
+        ),
         "epub" => epub(path),
         "html" | "htm" => Ok(strip_tags(&std::fs::read_to_string(path)?)),
         _ => pandoc(path),
@@ -64,9 +68,14 @@ fn epub(path: &Path) -> Result<String> {
 }
 
 fn pandoc(path: &Path) -> Result<String> {
-    let output = Command::new("pandoc").arg(path).args(["-t", "plain", "--wrap=none"]).output();
+    let output = Command::new("pandoc")
+        .arg(path)
+        .args(["-t", "plain", "--wrap=none"])
+        .output();
     match output {
-        Ok(output) if output.status.success() => Ok(String::from_utf8_lossy(&output.stdout).into_owned()),
+        Ok(output) if output.status.success() => {
+            Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        }
         Ok(output) => bail!("pandoc: {}", String::from_utf8_lossy(&output.stderr).trim()),
         Err(_) => bail!("needs pandoc (pacman -S pandoc-cli)"),
     }
@@ -115,9 +124,17 @@ pub fn strip_tags(html: &str) -> String {
         rest = &rest[start..];
         let Some(end) = rest.find('>') else { break };
         let tag = &rest[1..end];
-        let name: String = tag.trim_start_matches('/').chars().take_while(|c| c.is_alphanumeric()).collect::<String>().to_ascii_lowercase();
+        let name: String = tag
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
         rest = &rest[end + 1..];
-        if matches!(name.as_str(), "script" | "style" | "head") && !tag.starts_with('/') && !tag.ends_with('/') {
+        if matches!(name.as_str(), "script" | "style" | "head")
+            && !tag.starts_with('/')
+            && !tag.ends_with('/')
+        {
             // Skip to the matching close tag, whatever is inside (a `<` in a script is not a tag).
             let offset = html.len() - rest.len();
             let closing = format!("</{name}");
@@ -130,8 +147,30 @@ pub fn strip_tags(html: &str) -> String {
                 }
                 None => return decode_entities(&out),
             }
-        } else if matches!(name.as_str(), "p" | "div" | "br" | "li" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "tr" | "section" | "article" | "blockquote" | "pre" | "td" | "th") {
-            out.push_str(if name == "td" || name == "th" { " " } else { "\n\n" });
+        } else if matches!(
+            name.as_str(),
+            "p" | "div"
+                | "br"
+                | "li"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "tr"
+                | "section"
+                | "article"
+                | "blockquote"
+                | "pre"
+                | "td"
+                | "th"
+        ) {
+            out.push_str(if name == "td" || name == "th" {
+                " "
+            } else {
+                "\n\n"
+            });
         }
     }
     out.push_str(rest);
@@ -157,7 +196,9 @@ fn decode_entities(text: &str) -> String {
             "quot" => Some('"'),
             "apos" | "#39" => Some('\''),
             "nbsp" => Some(' '),
-            e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32),
+            e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16)
+                .ok()
+                .and_then(char::from_u32),
             e if e.starts_with('#') => e[1..].parse::<u32>().ok().and_then(char::from_u32),
             _ => None,
         };
@@ -193,6 +234,9 @@ mod tests {
     #[test]
     fn docx_xml_paragraphs() {
         let xml = r#"<w:document><w:body><w:p><w:r><w:t>Hello</w:t></w:r><w:r><w:t xml:space="preserve"> world</w:t></w:r></w:p><w:p><w:r><w:t>Second &amp; last</w:t></w:r></w:p></w:body></w:document>"#;
-        assert_eq!(xml_text(xml, &["w:p"]).trim(), "Hello world\n\nSecond & last");
+        assert_eq!(
+            xml_text(xml, &["w:p"]).trim(),
+            "Hello world\n\nSecond & last"
+        );
     }
 }

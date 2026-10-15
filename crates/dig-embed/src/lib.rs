@@ -8,7 +8,16 @@
 
 pub mod sizing;
 
-#[allow(non_upper_case_globals, non_camel_case_types, non_snake_case, dead_code, unsafe_op_in_unsafe_fn, unnecessary_transmutes)]
+#[allow(
+    non_upper_case_globals,
+    non_camel_case_types,
+    non_snake_case,
+    dead_code,
+    unsafe_op_in_unsafe_fn,
+    unnecessary_transmutes,
+    // bindgen's output, regenerated on every build: its style is not ours to fix.
+    clippy::all
+)]
 pub mod sys {
     include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 }
@@ -36,15 +45,22 @@ impl Models {
     pub fn locate(dir: &Path) -> Result<Self> {
         let text = dir.join(dig_core::model::TEXT_FILE);
         if !text.exists() {
-            bail!("no {} in {}: run scripts/fetch-models.sh", dig_core::model::TEXT_FILE, dir.display());
+            bail!(
+                "no {} in {}: run scripts/fetch-models.sh",
+                dig_core::model::TEXT_FILE,
+                dir.display()
+            );
         }
         let media = dir.join(dig_core::model::MEDIA_FILE);
-        Ok(Self { text, media: media.exists().then_some(media) })
+        Ok(Self {
+            text,
+            media: media.exists().then_some(media),
+        })
     }
 }
 
 /// How the model runs.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Just the text model (queries): 512-token inputs, ~0.3 GB.
     pub text_only: bool,
@@ -58,12 +74,6 @@ pub struct Options {
     pub batch_sequences: i32,
 }
 
-impl Default for Options {
-    fn default() -> Self {
-        Self { text_only: false, cpu_only: false, threads: 0, batch_tokens: 0, batch_sequences: 0 }
-    }
-}
-
 /// One input's vector, or why it has none (an unreadable file must not sink its neighbours).
 #[derive(Debug, Clone)]
 pub struct Embedding {
@@ -75,7 +85,11 @@ static BACKEND: Once = Once::new();
 static mut GPU_FOUND: bool = false;
 static mut BACKEND_NAMES: Vec<String> = Vec::new();
 
-unsafe extern "C" fn log_callback(level: sys::ggml_log_level, text: *const std::os::raw::c_char, _: *mut std::ffi::c_void) {
+unsafe extern "C" fn log_callback(
+    level: sys::ggml_log_level,
+    text: *const std::os::raw::c_char,
+    _: *mut std::ffi::c_void,
+) {
     // Warnings and errors only; llama.cpp logs a lot at load time. CONT continues the previous message.
     static mut LAST: sys::ggml_log_level = sys::GGML_LOG_LEVEL_INFO;
     unsafe {
@@ -101,8 +115,11 @@ fn init_backend(cpu_only: bool) {
     BACKEND.call_once(|| unsafe {
         sys::llama_log_set(Some(log_callback), ptr::null_mut());
         sys::mtmd_helper_log_set(Some(log_callback), ptr::null_mut());
-        let chosen = std::env::var_os("DIG_BACKENDS").filter(|v| !v.is_empty()).map(PathBuf::from);
-        let built_against = Some(PathBuf::from(env!("DIG_ENGINE_LIB"))).filter(|p| !p.as_os_str().is_empty());
+        let chosen = std::env::var_os("DIG_BACKENDS")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from);
+        let built_against =
+            Some(PathBuf::from(env!("DIG_ENGINE_LIB"))).filter(|p| !p.as_os_str().is_empty());
         for folder in chosen.into_iter().chain(built_against) {
             if sys::ggml_backend_dev_count() > 0 {
                 break;
@@ -113,7 +130,8 @@ fn init_backend(cpu_only: bool) {
         if sys::ggml_backend_dev_count() == 0 {
             sys::ggml_backend_load_all();
         }
-        GPU_FOUND = (0..sys::ggml_backend_dev_count()).any(|i| is_gpu(sys::ggml_backend_dev_get(i)));
+        GPU_FOUND =
+            (0..sys::ggml_backend_dev_count()).any(|i| is_gpu(sys::ggml_backend_dev_get(i)));
         if cpu_only {
             // Unloaded rather than just unused: a GPU backend would still set itself up (Vulkan: seconds).
             for index in (0..sys::ggml_backend_reg_count()).rev() {
@@ -126,7 +144,11 @@ fn init_backend(cpu_only: bool) {
             }
         }
         BACKEND_NAMES = (0..sys::ggml_backend_reg_count())
-            .map(|i| CStr::from_ptr(sys::ggml_backend_reg_name(sys::ggml_backend_reg_get(i))).to_string_lossy().into_owned())
+            .map(|i| {
+                CStr::from_ptr(sys::ggml_backend_reg_name(sys::ggml_backend_reg_get(i)))
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         sys::llama_backend_init();
     });
@@ -180,12 +202,18 @@ impl Embedder {
         let started = std::time::Instant::now();
         init_backend(options.cpu_only);
         if !options.text_only && models.media.is_none() {
-            bail!("{} (images and audio) isn't downloaded yet", dig_core::model::MEDIA_FILE);
+            bail!(
+                "{} (images and audio) isn't downloaded yet",
+                dig_core::model::MEDIA_FILE
+            );
         }
         let threads = if options.threads > 0 {
             options.threads
         } else {
-            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8) as i32
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(8) as i32
         };
         unsafe {
             let mut model_params = sys::llama_model_default_params();
@@ -197,8 +225,20 @@ impl Embedder {
             }
             // One input must fit one micro-batch: 2048 tokens (the reference's cut), which also holds a 1120-token
             // image or a 750-token 30 s clip. Queries are short, so the query encoder reserves less and cuts at 512.
-            let max_tokens: usize = if options.batch_tokens > 0 { options.batch_tokens.max(2048.min(if options.text_only { 512 } else { 2048 })) } else if options.text_only { 512 } else { 2048 };
-            let max_sequences = if options.batch_sequences > 0 { options.batch_sequences } else { MAX_SEQUENCES };
+            let max_tokens: usize = if options.batch_tokens > 0 {
+                options
+                    .batch_tokens
+                    .max(2048.min(if options.text_only { 512 } else { 2048 }))
+            } else if options.text_only {
+                512
+            } else {
+                2048
+            };
+            let max_sequences = if options.batch_sequences > 0 {
+                options.batch_sequences
+            } else {
+                MAX_SEQUENCES
+            };
             let mut params = sys::llama_context_default_params();
             params.n_ctx = max_tokens as u32;
             params.n_batch = max_tokens as u32;
@@ -206,9 +246,15 @@ impl Embedder {
             params.n_seq_max = max_sequences as u32;
             // Experiment knobs (see docs): a unified KV lets one input use the whole context, but every input then
             // attends over the whole batch under a mask.
-            params.kv_unified = std::env::var("DIG_KV_UNIFIED").map(|v| v != "0").unwrap_or(true);
+            params.kv_unified = std::env::var("DIG_KV_UNIFIED")
+                .map(|v| v != "0")
+                .unwrap_or(true);
             if let Ok(v) = std::env::var("DIG_FLASH") {
-                params.flash_attn_type = if v == "1" { sys::LLAMA_FLASH_ATTN_TYPE_ENABLED } else { sys::LLAMA_FLASH_ATTN_TYPE_DISABLED };
+                params.flash_attn_type = if v == "1" {
+                    sys::LLAMA_FLASH_ATTN_TYPE_ENABLED
+                } else {
+                    sys::LLAMA_FLASH_ATTN_TYPE_DISABLED
+                };
             }
             params.embeddings = true;
             params.pooling_type = sys::LLAMA_POOLING_TYPE_MEAN;
@@ -267,7 +313,8 @@ impl Embedder {
         let mut vectors = Vec::with_capacity(texts.len());
         for text in texts {
             let tokens = self.tokenize(text);
-            if self.sequences == self.max_sequences || self.tokens + tokens.len() > self.max_tokens {
+            if self.sequences == self.max_sequences || self.tokens + tokens.len() > self.max_tokens
+            {
                 vectors.extend(self.run()?);
             }
             self.begin();
@@ -289,7 +336,10 @@ impl Embedder {
         if !sizing::BUDGETS.contains(&budget) {
             bail!("budget must be one of {:?}", sizing::BUDGETS);
         }
-        Ok(paths.iter().map(|path| self.embedding(|s| s.embed_media(path, true, budget))).collect())
+        Ok(paths
+            .iter()
+            .map(|path| self.embedding(|s| s.embed_media(path, true, budget)))
+            .collect())
     }
 
     /// Audio files (wav, mp3, flac), the first 30 s of each.
@@ -297,16 +347,25 @@ impl Embedder {
         if self.media.is_null() {
             bail!("this embedder was started text-only");
         }
-        Ok(paths.iter().map(|path| self.embedding(|s| s.embed_media(path, false, 0))).collect())
+        Ok(paths
+            .iter()
+            .map(|path| self.embedding(|s| s.embed_media(path, false, 0)))
+            .collect())
     }
 
     fn embedding(&mut self, make: impl FnOnce(&mut Self) -> Result<Vec<f32>>) -> Embedding {
         match make(self) {
-            Ok(vector) => Embedding { vector: Some(vector), error: None },
+            Ok(vector) => Embedding {
+                vector: Some(vector),
+                error: None,
+            },
             Err(error) => {
                 let mut message = format!("{error:#}");
                 message.truncate(300);
-                Embedding { vector: None, error: Some(message) }
+                Embedding {
+                    vector: None,
+                    error: Some(message),
+                }
             }
         }
     }
@@ -353,7 +412,9 @@ impl Embedder {
                     }
                 }
                 let mut vectors = self.run()?;
-                vectors.pop().ok_or_else(|| anyhow!("no vector for {}", path.display()))
+                vectors
+                    .pop()
+                    .ok_or_else(|| anyhow!("no vector for {}", path.display()))
             })();
             sys::mtmd_input_chunks_free(chunks);
             sys::mtmd_bitmap_free(bitmap);
@@ -363,16 +424,29 @@ impl Embedder {
 
     /// Reads an image or audio file with mtmd's helpers (stb_image, miniaudio at 16 kHz), resizes images for `budget`
     /// and cuts audio at 30 s. The caller frees the bitmap.
-    unsafe fn load(&mut self, path: &Path, image: bool, budget: usize) -> Result<*mut sys::mtmd_bitmap> {
+    unsafe fn load(
+        &mut self,
+        path: &Path,
+        image: bool,
+        budget: usize,
+    ) -> Result<*mut sys::mtmd_bitmap> {
         unsafe {
             let c_path = CString::new(path.to_string_lossy().as_bytes())?;
-            let wrapper = sys::mtmd_helper_bitmap_init_from_file(self.media, c_path.as_ptr(), false, sys::mtmd_helper_init_opt_default());
+            let wrapper = sys::mtmd_helper_bitmap_init_from_file(
+                self.media,
+                c_path.as_ptr(),
+                false,
+                sys::mtmd_helper_init_opt_default(),
+            );
             if !wrapper.video_ctx.is_null() {
                 if !wrapper.bitmap.is_null() {
                     sys::mtmd_bitmap_free(wrapper.bitmap);
                 }
                 sys::mtmd_helper_video_free(wrapper.video_ctx);
-                bail!("video goes in as frames and sound, not as a file: {}", path.display());
+                bail!(
+                    "video goes in as frames and sound, not as a file: {}",
+                    path.display()
+                );
             }
             let bitmap = wrapper.bitmap;
             if bitmap.is_null() {
@@ -380,10 +454,17 @@ impl Embedder {
             }
             if sys::mtmd_bitmap_is_audio(bitmap) == image {
                 sys::mtmd_bitmap_free(bitmap);
-                bail!("not {}: {}", if image { "an image" } else { "audio" }, path.display());
+                bail!(
+                    "not {}: {}",
+                    if image { "an image" } else { "audio" },
+                    path.display()
+                );
             }
             if image {
-                let (width, height) = (sys::mtmd_bitmap_get_nx(bitmap) as usize, sys::mtmd_bitmap_get_ny(bitmap) as usize);
+                let (width, height) = (
+                    sys::mtmd_bitmap_get_nx(bitmap) as usize,
+                    sys::mtmd_bitmap_get_ny(bitmap) as usize,
+                );
                 let Some((th, tw)) = sizing::target_size(height, width, budget) else {
                     sys::mtmd_bitmap_free(bitmap);
                     bail!("image too thin to embed: {}", path.display());
@@ -391,7 +472,10 @@ impl Embedder {
                 if (th, tw) == (height, width) {
                     return Ok(bitmap);
                 }
-                let data = std::slice::from_raw_parts(sys::mtmd_bitmap_get_data(bitmap), width * height * 3);
+                let data = std::slice::from_raw_parts(
+                    sys::mtmd_bitmap_get_data(bitmap),
+                    width * height * 3,
+                );
                 let pixels = sizing::resize_bicubic(data, width, height, tw, th);
                 sys::mtmd_bitmap_free(bitmap);
                 let resized = sys::mtmd_bitmap_init(tw as u32, th as u32, pixels.as_ptr());
@@ -405,7 +489,10 @@ impl Embedder {
             if samples <= limit {
                 return Ok(bitmap);
             }
-            let prefix = sys::mtmd_bitmap_init_from_audio(limit, sys::mtmd_bitmap_get_data(bitmap) as *const f32);
+            let prefix = sys::mtmd_bitmap_init_from_audio(
+                limit,
+                sys::mtmd_bitmap_get_data(bitmap) as *const f32,
+            );
             sys::mtmd_bitmap_free(bitmap);
             if prefix.is_null() {
                 bail!("can't cut {} at 30 s", path.display());
@@ -420,12 +507,24 @@ impl Embedder {
             let bytes = text.as_bytes();
             let mut tokens: Vec<sys::llama_token> = vec![0; bytes.len() + 8];
             let mut count = sys::llama_tokenize(
-                self.vocab, bytes.as_ptr() as *const _, bytes.len() as i32, tokens.as_mut_ptr(), tokens.len() as i32, true, true,
+                self.vocab,
+                bytes.as_ptr() as *const _,
+                bytes.len() as i32,
+                tokens.as_mut_ptr(),
+                tokens.len() as i32,
+                true,
+                true,
             );
             if count < 0 {
                 tokens = vec![0; (-count) as usize];
                 count = sys::llama_tokenize(
-                    self.vocab, bytes.as_ptr() as *const _, bytes.len() as i32, tokens.as_mut_ptr(), tokens.len() as i32, true, true,
+                    self.vocab,
+                    bytes.as_ptr() as *const _,
+                    bytes.len() as i32,
+                    tokens.as_mut_ptr(),
+                    tokens.len() as i32,
+                    true,
+                    true,
                 );
             }
             tokens.truncate(count.max(0) as usize);
@@ -452,14 +551,20 @@ impl Embedder {
     }
 
     fn add_token(&mut self, token: sys::llama_token) -> Result<()> {
-        let index = unsafe { sys::llama_batch_ext_add_token(self.batch, self.sequences - 1, token) };
+        let index =
+            unsafe { sys::llama_batch_ext_add_token(self.batch, self.sequences - 1, token) };
         self.place(index)
     }
 
     unsafe fn add_rows(&mut self, rows: *const f32, count: usize) -> Result<()> {
         for row in 0..count {
-            let embd = sys::llama_embd { data: unsafe { rows.add(row * self.row_size) }, n_rows: 1, n_embd: self.row_size };
-            let index = unsafe { sys::llama_batch_ext_add_embd(self.batch, self.sequences - 1, embd) }; // copied by the batch
+            let embd = sys::llama_embd {
+                data: unsafe { rows.add(row * self.row_size) },
+                n_rows: 1,
+                n_embd: self.row_size,
+            };
+            let index =
+                unsafe { sys::llama_batch_ext_add_embd(self.batch, self.sequences - 1, embd) }; // copied by the batch
             self.place(index)?;
         }
         Ok(())
@@ -471,7 +576,9 @@ impl Embedder {
         }
         let pos: [sys::llama_pos; 4] = [self.position, 0, 0, 0];
         unsafe {
-            if !sys::llama_batch_ext_set_pos(self.batch, index, pos.as_ptr()) || !sys::llama_batch_ext_set_output_embd(self.batch, index, true) {
+            if !sys::llama_batch_ext_set_pos(self.batch, index, pos.as_ptr())
+                || !sys::llama_batch_ext_set_output_embd(self.batch, index, true)
+            {
                 bail!("can't place token {index}");
             }
         }
@@ -483,7 +590,8 @@ impl Embedder {
     /// Runs the text model over the batch and returns one L2-normalized vector per input, in order.
     fn run(&mut self) -> Result<Vec<Vec<f32>>> {
         let result = unsafe {
-            let status = sys::llama_process(self.context, sys::LLAMA_PROCESS_TYPE_ENCODE, self.batch);
+            let status =
+                sys::llama_process(self.context, sys::LLAMA_PROCESS_TYPE_ENCODE, self.batch);
             if status != 0 {
                 Err(anyhow!("llama_process failed ({status})"))
             } else {
@@ -495,7 +603,11 @@ impl Embedder {
                         }
                         let raw = std::slice::from_raw_parts(pooled, self.dim);
                         let sum: f64 = raw.iter().map(|&v| v as f64 * v as f64).sum();
-                        let scale = if sum > 0.0 { (1.0 / sum.sqrt()) as f32 } else { 0.0 };
+                        let scale = if sum > 0.0 {
+                            (1.0 / sum.sqrt()) as f32
+                        } else {
+                            0.0
+                        };
                         Ok(raw.iter().map(|&v| v * scale).collect())
                     })
                     .collect()

@@ -16,15 +16,31 @@ use crate::crawler::{Root, Skipped, crawl};
 #[derive(Debug, Clone)]
 pub enum Event {
     /// A root was crawled: how many files it holds, how many are new or changed, what was skipped.
-    Crawled { root: PathBuf, files: usize, pending: usize, removed: usize, skipped_secrets: usize, skipped_code_dirs: usize, huge_dirs: Vec<PathBuf> },
+    Crawled {
+        root: PathBuf,
+        files: usize,
+        pending: usize,
+        removed: usize,
+        skipped_secrets: usize,
+        skipped_code_dirs: usize,
+        huge_dirs: Vec<PathBuf>,
+    },
     /// A file is being read now.
     Reading { path: PathBuf, kind: FileKind },
     /// A file was read and embedded.
-    Indexed { path: PathBuf, kind: FileKind, chunks: usize },
+    Indexed {
+        path: PathBuf,
+        kind: FileKind,
+        chunks: usize,
+    },
     /// A file couldn't be read; it is tried again when it changes.
     Failed { path: PathBuf, error: String },
     /// Everything pending is done.
-    Done { indexed: usize, failed: usize, seconds: f64 },
+    Done {
+        indexed: usize,
+        failed: usize,
+        seconds: f64,
+    },
 }
 
 pub struct Indexer<'a> {
@@ -34,6 +50,9 @@ pub struct Indexer<'a> {
     /// Asked before each file: may block while indexing is paused; `false` stops (the rest stays pending).
     pub gate: Box<dyn FnMut() -> bool + 'a>,
 }
+
+/// A file read by an extraction thread: its chunks, or why it couldn't be read.
+type Extracted = (dig_store::FileRow, Result<Vec<Chunk>, String>);
 
 /// How many pending files are taken per round (texts of a round embed in shared batches).
 const ROUND: usize = 32;
@@ -51,13 +70,28 @@ impl<'a> Indexer<'a> {
             let mut pending = 0;
             let mut keep: HashSet<PathBuf> = HashSet::with_capacity(candidates.len());
             for c in &candidates {
-                let (_, changed) = self.store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
+                let (_, changed) = self
+                    .store
+                    .see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
                 pending += changed as usize;
                 keep.insert(c.path.clone());
             }
             let removed = self.store.remove_missing(&root.path, &keep)?;
-            let Skipped { secrets, code_project_dirs, huge_dirs, .. } = skipped;
-            (self.on_event)(Event::Crawled { root: root.path.clone(), files: candidates.len(), pending, removed, skipped_secrets: secrets, skipped_code_dirs: code_project_dirs, huge_dirs });
+            let Skipped {
+                secrets,
+                code_project_dirs,
+                huge_dirs,
+                ..
+            } = skipped;
+            (self.on_event)(Event::Crawled {
+                root: root.path.clone(),
+                files: candidates.len(),
+                pending,
+                removed,
+                skipped_secrets: secrets,
+                skipped_code_dirs: code_project_dirs,
+                huge_dirs,
+            });
         }
         self.index_pending()
     }
@@ -78,18 +112,33 @@ impl<'a> Indexer<'a> {
                 break;
             }
             if let Some(first) = files.first() {
-                (self.on_event)(Event::Reading { path: first.path.clone(), kind: first.kind });
+                (self.on_event)(Event::Reading {
+                    path: first.path.clone(),
+                    kind: first.kind,
+                });
             }
             let queue = std::sync::Mutex::new(files.into_iter());
-            let results: std::sync::Mutex<Vec<(dig_store::FileRow, Result<Vec<Chunk>, String>)>> = std::sync::Mutex::new(Vec::new());
-            let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(2, EXTRACT_THREADS);
+            let results: std::sync::Mutex<Vec<Extracted>> = std::sync::Mutex::new(Vec::new());
+            let workers = std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(2)
+                .clamp(2, EXTRACT_THREADS);
             std::thread::scope(|scope| {
                 for _ in 0..workers {
                     let (queue, results) = (&queue, &results);
-                    scope.spawn(move || loop {
-                        let Some(file) = queue.lock().unwrap().next() else { break };
-                        let result = dig_extract::extract(&file.path, file.kind).map_err(|e| format!("{e:#}"));
-                        results.lock().unwrap().push((file, result));
+                    scope.spawn(move || {
+                        loop {
+                            let Some(file) = queue.lock().unwrap().next() else {
+                                break;
+                            };
+                            let result = dig_extract::extract(&file.path, file.kind)
+                                .map_err(|e| format!("{e:#}"));
+                            // Here, while video frames and rendered pages are still on disk and off the model's thread.
+                            if let Ok(chunks) = &result {
+                                dig_extract::thumbs::pregenerate(&file.path, file.kind, chunks);
+                            }
+                            results.lock().unwrap().push((file, result));
+                        }
                     });
                 }
             });
@@ -98,11 +147,20 @@ impl<'a> Indexer<'a> {
             let mut work: Vec<(dig_store::FileRow, Vec<Chunk>)> = Vec::new();
             for (file, result) in extracted {
                 match result {
-                    Ok(chunks) => work.push((file, chunks)),
+                    Ok(chunks) => {
+                        if matches!(file.kind, FileKind::Image) {
+                            self.store
+                                .set_taken_at(file.id, dig_extract::exif::taken_at(&file.path))?;
+                        }
+                        work.push((file, chunks))
+                    }
                     Err(error) => {
                         self.store.mark_failed(file.id, &error)?;
                         failed += 1;
-                        (self.on_event)(Event::Failed { path: file.path, error });
+                        (self.on_event)(Event::Failed {
+                            path: file.path,
+                            error,
+                        });
                     }
                 }
             }
@@ -115,8 +173,14 @@ impl<'a> Indexer<'a> {
                     }
                 }
             }
-            let mut vectors: Vec<Vec<Option<Vec<f32>>>> = work.iter().map(|(_, chunks)| vec![None; chunks.len()]).collect();
-            let mut errors: Vec<Vec<Option<String>>> = work.iter().map(|(_, chunks)| vec![None; chunks.len()]).collect();
+            let mut vectors: Vec<Vec<Option<Vec<f32>>>> = work
+                .iter()
+                .map(|(_, chunks)| vec![None; chunks.len()])
+                .collect();
+            let mut errors: Vec<Vec<Option<String>>> = work
+                .iter()
+                .map(|(_, chunks)| vec![None; chunks.len()])
+                .collect();
             for batch in texts.chunks(TEXT_BATCH) {
                 let inputs: Vec<String> = batch.iter().map(|(_, _, t)| t.clone()).collect();
                 match self.embedder.embed_texts(&inputs) {
@@ -134,17 +198,29 @@ impl<'a> Indexer<'a> {
             }
             // Media, one at a time (each is its own model run).
             for (i, (file, chunks)) in work.iter().enumerate() {
-                if chunks.iter().any(|c| matches!(c.embed, Embed::Image { .. } | Embed::Audio { .. })) {
+                if chunks
+                    .iter()
+                    .any(|c| matches!(c.embed, Embed::Image { .. } | Embed::Audio { .. }))
+                {
                     if !(self.gate)() {
                         stopped = true;
                         break;
                     }
-                    (self.on_event)(Event::Reading { path: file.path.clone(), kind: file.kind });
+                    (self.on_event)(Event::Reading {
+                        path: file.path.clone(),
+                        kind: file.kind,
+                    });
                 }
                 for (j, chunk) in chunks.iter().enumerate() {
                     let result = match &chunk.embed {
-                        Embed::Image { path, budget } => self.embedder.embed_images(&[path.clone()], *budget).map(|mut v| v.remove(0)),
-                        Embed::Audio { path } => self.embedder.embed_audio(&[path.clone()]).map(|mut v| v.remove(0)),
+                        Embed::Image { path, budget } => self
+                            .embedder
+                            .embed_images(std::slice::from_ref(path), *budget)
+                            .map(|mut v| v.remove(0)),
+                        Embed::Audio { path } => self
+                            .embedder
+                            .embed_audio(std::slice::from_ref(path))
+                            .map(|mut v| v.remove(0)),
                         _ => continue,
                     };
                     match result {
@@ -172,21 +248,39 @@ impl<'a> Indexer<'a> {
                     } else if wanted {
                         content_ok = true;
                     }
-                    let modality = if vector.is_some() { chunk.modality() } else { dig_core::Modality::None };
-                    rows.push(NewChunk { kind: chunk.kind, modality, locator: chunk.locator, locator_end: chunk.locator_end, text: chunk.text, vector });
+                    let modality = if vector.is_some() {
+                        chunk.modality()
+                    } else {
+                        dig_core::Modality::None
+                    };
+                    rows.push(NewChunk {
+                        kind: chunk.kind,
+                        modality,
+                        locator: chunk.locator,
+                        locator_end: chunk.locator_end,
+                        text: chunk.text,
+                        vector,
+                    });
                 }
                 let _ = &scratch;
                 match (content_ok, content_failed) {
                     (false, Some(error)) => {
                         self.store.mark_failed(file.id, &error)?;
                         failed += 1;
-                        (self.on_event)(Event::Failed { path: file.path, error });
+                        (self.on_event)(Event::Failed {
+                            path: file.path,
+                            error,
+                        });
                     }
                     _ => {
                         let n = rows.len();
                         self.store.write_chunks(file.id, &rows)?;
                         indexed += 1;
-                        (self.on_event)(Event::Indexed { path: file.path, kind: file.kind, chunks: n });
+                        (self.on_event)(Event::Indexed {
+                            path: file.path,
+                            kind: file.kind,
+                            chunks: n,
+                        });
                     }
                 }
             }
@@ -195,19 +289,28 @@ impl<'a> Indexer<'a> {
             }
         }
         let _ = std::fs::remove_dir_all(dig_extract::media::scratch_dir());
-        (self.on_event)(Event::Done { indexed, failed, seconds: started.elapsed().as_secs_f64() });
+        (self.on_event)(Event::Done {
+            indexed,
+            failed,
+            seconds: started.elapsed().as_secs_f64(),
+        });
         Ok(())
     }
 }
 
 /// The roots the store remembers, for `dig index` with no arguments.
 pub fn stored_roots(store: &Store) -> Result<Vec<Root>> {
-    Ok(store.roots()?.into_iter().map(|(path, code)| Root { path, code }).collect())
+    Ok(store
+        .roots()?
+        .into_iter()
+        .map(|(path, code)| Root { path, code })
+        .collect())
 }
 
 /// Canonical, absolute, existing directory, or an error that says which.
 pub fn resolve_root(path: &Path) -> Result<PathBuf> {
-    let full = std::fs::canonicalize(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
+    let full =
+        std::fs::canonicalize(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))?;
     anyhow::ensure!(full.is_dir(), "{} is not a folder", full.display());
     Ok(full)
 }

@@ -15,13 +15,24 @@ pub const MAX_BYTES: u64 = 1 << 20;
 pub const MAX_STRETCHES: usize = 300;
 
 const EXTENSIONS: &[&str] = &[
-    "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "go", "c", "h", "cc", "cpp", "cxx", "hpp", "hh", "java", "kt", "kts",
-    "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "pl", "pm", "sql", "css", "scss", "less", "vue", "svelte",
-    "zig", "nim", "ex", "exs", "erl", "hs", "ml", "mli", "scala", "cs", "fs", "dart", "r", "jl", "nix", "cmake", "mk",
-    "toml", "yaml", "yml", "json", "jsonc", "md", "rst", "txt", "html", "xml", "proto", "graphql", "tf", "hcl", "qml", "el",
-    "clj", "cljs", "groovy", "gradle", "m", "mm", "v", "sv", "vhd", "asm", "s", "ps1", "bat", "cfg", "ini", "conf", "env",
+    "rs", "py", "js", "mjs", "cjs", "ts", "tsx", "jsx", "go", "c", "h", "cc", "cpp", "cxx", "hpp",
+    "hh", "java", "kt", "kts", "swift", "rb", "php", "lua", "sh", "bash", "zsh", "fish", "pl",
+    "pm", "sql", "css", "scss", "less", "vue", "svelte", "zig", "nim", "ex", "exs", "erl", "hs",
+    "ml", "mli", "scala", "cs", "fs", "dart", "r", "jl", "nix", "cmake", "mk", "toml", "yaml",
+    "yml", "json", "jsonc", "md", "rst", "txt", "html", "xml", "proto", "graphql", "tf", "hcl",
+    "qml", "el", "clj", "cljs", "groovy", "gradle", "m", "mm", "v", "sv", "vhd", "asm", "s", "ps1",
+    "bat", "cfg", "ini", "conf", "env",
 ];
-const NAMES: &[&str] = &["Makefile", "Dockerfile", "Justfile", "Rakefile", "Gemfile", "CMakeLists.txt", "PKGBUILD", "Cargo.lock"];
+const NAMES: &[&str] = &[
+    "Makefile",
+    "Dockerfile",
+    "Justfile",
+    "Rakefile",
+    "Gemfile",
+    "CMakeLists.txt",
+    "PKGBUILD",
+    "Cargo.lock",
+];
 
 /// Whether this file is source (or a repo's docs and config), by extension or name.
 pub fn is_code(path: &Path) -> bool {
@@ -30,12 +41,15 @@ pub fn is_code(path: &Path) -> bool {
         return true;
     }
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    NAMES.contains(&name) || (ext.is_empty() && name.starts_with('.') == false && looks_like_script(path))
+    NAMES.contains(&name) || (ext.is_empty() && !name.starts_with('.') && looks_like_script(path))
 }
 
 fn looks_like_script(path: &Path) -> bool {
     let mut head = [0u8; 2];
-    std::fs::File::open(path).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).map(|_| &head == b"#!").unwrap_or(false)
+    std::fs::File::open(path)
+        .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head))
+        .map(|_| &head == b"#!")
+        .unwrap_or(false)
 }
 
 /// The stretches of `path`, titled with its last path components so a search for "the config loader" lands on
@@ -49,7 +63,16 @@ pub fn extract(path: &Path) -> Result<Vec<Chunk>> {
         anyhow::bail!("binary");
     }
     let text = String::from_utf8_lossy(&bytes);
-    let title: String = path.components().rev().take(3).filter_map(|c| c.as_os_str().to_str()).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("/");
+    let title: String = path
+        .components()
+        .rev()
+        .take(3)
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("/");
     Ok(stretches(&text)
         .into_iter()
         .take(MAX_STRETCHES)
@@ -57,7 +80,11 @@ pub fn extract(path: &Path) -> Result<Vec<Chunk>> {
             kind: ChunkKind::Lines,
             locator: Some(first as f64),
             locator_end: Some(last as f64),
-            embed: if crate::text::mostly_numeric(&body) { Embed::None } else { Embed::Text(prompts::document(Some(&title), &body)) },
+            embed: if crate::text::mostly_numeric(&body) {
+                Embed::None
+            } else {
+                Embed::Text(prompts::document(Some(&title), &body))
+            },
             text: body,
         })
         .collect())
@@ -96,17 +123,28 @@ mod tests {
 
     #[test]
     fn stretches_keep_whole_lines() {
-        let text: String = (1..=200).map(|i| format!("fn f{i}() {{ return {i}; }}")).collect::<Vec<_>>().join("\n");
+        let text: String = (1..=200)
+            .map(|i| format!("fn f{i}() {{ return {i}; }}"))
+            .collect::<Vec<_>>()
+            .join("\n");
         let s = stretches(&text);
         assert!(s.len() > 1);
         assert_eq!(s[0].0, 1);
         for (i, (first, last, body)) in s.iter().enumerate() {
-            assert!(body.len() <= STRETCH_CHARS, "stretch {i} is {} chars", body.len());
+            assert!(
+                body.len() <= STRETCH_CHARS,
+                "stretch {i} is {} chars",
+                body.len()
+            );
             assert_eq!(body.lines().count(), last - first + 1);
             if i > 0 {
                 assert_eq!(*first, s[i - 1].1 + 1);
             }
         }
-        assert!(is_code(Path::new("/p/main.rs")) && is_code(Path::new("/p/Makefile")) && !is_code(Path::new("/p/photo.jpg")));
+        assert!(
+            is_code(Path::new("/p/main.rs"))
+                && is_code(Path::new("/p/Makefile"))
+                && !is_code(Path::new("/p/photo.jpg"))
+        );
     }
 }

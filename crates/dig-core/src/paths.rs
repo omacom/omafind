@@ -7,7 +7,10 @@ fn home() -> PathBuf {
 }
 
 fn xdg(var: &str, fallback: &str) -> PathBuf {
-    std::env::var_os(var).filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| home().join(fallback))
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home().join(fallback))
 }
 
 /// `~/.local/share/dig`: models, engine, the index.
@@ -31,9 +34,15 @@ pub fn runtime_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
         return PathBuf::from(dir);
     }
-    let uid = std::fs::metadata(home()).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap_or(0);
+    let uid = std::fs::metadata(home())
+        .map(|m| std::os::unix::fs::MetadataExt::uid(&m))
+        .unwrap_or(0);
     let run = PathBuf::from(format!("/run/user/{uid}"));
-    if run.is_dir() { run } else { PathBuf::from("/tmp") }
+    if run.is_dir() {
+        run
+    } else {
+        PathBuf::from("/tmp")
+    }
 }
 
 /// The main index.

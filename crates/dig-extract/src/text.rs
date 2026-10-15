@@ -22,13 +22,26 @@ pub fn extract(path: &Path) -> Result<Vec<Chunk>> {
 
 /// `text` (already read from `path`) as passage chunks, the file's stem as the document title.
 pub fn passages_of(path: &Path, text: &str) -> Vec<Chunk> {
-    let title = path.file_stem().and_then(|s| s.to_str()).map(|s| s.replace(['_', '-'], " "));
+    let title = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .map(|s| s.replace(['_', '-'], " "));
     passages(text)
         .into_iter()
         .take(MAX_PASSAGES)
         .map(|(offset, body)| {
-            let embed = if mostly_numeric(&body) { Embed::None } else { Embed::Text(prompts::document(title.as_deref(), &body)) };
-            Chunk { kind: ChunkKind::Passage, locator: Some(offset as f64), locator_end: Some((offset + body.chars().count()) as f64), text: body, embed }
+            let embed = if mostly_numeric(&body) {
+                Embed::None
+            } else {
+                Embed::Text(prompts::document(title.as_deref(), &body))
+            };
+            Chunk {
+                kind: ChunkKind::Passage,
+                locator: Some(offset as f64),
+                locator_end: Some((offset + body.chars().count()) as f64),
+                text: body,
+                embed,
+            }
         })
         .collect()
 }
@@ -48,7 +61,11 @@ pub fn passages(text: &str) -> Vec<(usize, String)> {
             break;
         }
         let target = (start + PASSAGE_CHARS).min(chars.len());
-        let end = if target == chars.len() { target } else { break_before(&chars, start, target) };
+        let end = if target == chars.len() {
+            target
+        } else {
+            break_before(&chars, start, target)
+        };
         let body: String = chars[start..end].iter().collect();
         let body = body.trim().to_owned();
         if !body.is_empty() {
@@ -76,7 +93,9 @@ fn break_before(chars: &[char], start: usize, target: usize) -> usize {
     }
     let mut i = target;
     while i > floor {
-        if matches!(chars[i - 1], '.' | '!' | '?' | '。') && (i == chars.len() || chars[i].is_whitespace()) {
+        if matches!(chars[i - 1], '.' | '!' | '?' | '。')
+            && (i == chars.len() || chars[i].is_whitespace())
+        {
             return i;
         }
         i -= 1;
@@ -116,7 +135,11 @@ mod tests {
         assert!(p.len() >= 4, "{}", p.len());
         for (offset, body) in &p {
             assert!(body.len() <= PASSAGE_CHARS + 2);
-            assert!(body.ends_with('.'), "cut mid-sentence at {offset}: …{}", &body[body.len() - 20..]);
+            assert!(
+                body.ends_with('.'),
+                "cut mid-sentence at {offset}: …{}",
+                &body[body.len() - 20..]
+            );
         }
         // Consecutive passages share text.
         let a: Vec<char> = p[0].1.chars().collect();
@@ -134,6 +157,8 @@ mod tests {
     #[test]
     fn numbers_are_keyword_only() {
         assert!(mostly_numeric(&"12345 67890 ".repeat(10)));
-        assert!(!mostly_numeric("Rent is due on the first of each month by bank transfer; late payments incur a fee."));
+        assert!(!mostly_numeric(
+            "Rent is due on the first of each month by bank transfer; late payments incur a fee."
+        ));
     }
 }

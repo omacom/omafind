@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 
@@ -11,33 +11,47 @@ use dig_client::{Event, Request, Response};
 use dig_store::Store;
 
 use crate::daemon::{Msg, Shared, status};
-use crate::searcher::Searcher;
+use crate::searcher::{Query, Searcher};
 
-pub fn start(shared: Arc<Shared>, searcher: Arc<Searcher>, tx: Sender<Msg>, index_path: PathBuf) -> Result<()> {
+pub fn start(
+    shared: Arc<Shared>,
+    searcher: Arc<Searcher>,
+    tx: Sender<Msg>,
+    index_path: PathBuf,
+) -> Result<()> {
     let path = dig_client::socket_path();
     if UnixStream::connect(&path).is_ok() {
         bail!("another digd is already listening on {}", path.display());
     }
     let _ = std::fs::remove_file(&path);
-    let listener = UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
-    std::thread::Builder::new().name("dig-server".into()).spawn(move || {
-        for stream in listener.incoming() {
-            let Ok(stream) = stream else { continue };
-            let shared = shared.clone();
-            let searcher = searcher.clone();
-            let tx = tx.clone();
-            let index_path = index_path.clone();
-            std::thread::spawn(move || {
-                if let Err(error) = serve(stream, shared, searcher, tx, index_path) {
-                    crate::log!("connection: {error:#}");
-                }
-            });
-        }
-    })?;
+    let listener =
+        UnixListener::bind(&path).with_context(|| format!("binding {}", path.display()))?;
+    std::thread::Builder::new()
+        .name("dig-server".into())
+        .spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let shared = shared.clone();
+                let searcher = searcher.clone();
+                let tx = tx.clone();
+                let index_path = index_path.clone();
+                std::thread::spawn(move || {
+                    if let Err(error) = serve(stream, shared, searcher, tx, index_path) {
+                        crate::log!("connection: {error:#}");
+                    }
+                });
+            }
+        })?;
     Ok(())
 }
 
-fn serve(stream: UnixStream, shared: Arc<Shared>, searcher: Arc<Searcher>, tx: Sender<Msg>, index_path: PathBuf) -> Result<()> {
+fn serve(
+    stream: UnixStream,
+    shared: Arc<Shared>,
+    searcher: Arc<Searcher>,
+    tx: Sender<Msg>,
+    index_path: PathBuf,
+) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
     let mut line = String::new();
@@ -49,7 +63,12 @@ fn serve(stream: UnixStream, shared: Arc<Shared>, searcher: Arc<Searcher>, tx: S
         let request: Request = match serde_json::from_str(&line) {
             Ok(request) => request,
             Err(error) => {
-                reply(&mut writer, &Response::Error { message: format!("bad request: {error}") })?;
+                reply(
+                    &mut writer,
+                    &Response::Error {
+                        message: format!("bad request: {error}"),
+                    },
+                )?;
                 continue;
             }
         };
@@ -69,20 +88,53 @@ fn serve(stream: UnixStream, shared: Arc<Shared>, searcher: Arc<Searcher>, tx: S
                 return Ok(());
             }
             other => {
-                let response = handle(other, &shared, &searcher, &tx, &index_path).unwrap_or_else(|error| Response::Error { message: format!("{error:#}") });
+                let response =
+                    handle(other, &shared, &searcher, &tx, &index_path).unwrap_or_else(|error| {
+                        Response::Error {
+                            message: format!("{error:#}"),
+                        }
+                    });
                 reply(&mut writer, &response)?;
             }
         }
     }
 }
 
-fn handle(request: Request, shared: &Shared, searcher: &Searcher, tx: &Sender<Msg>, index_path: &PathBuf) -> Result<Response> {
+fn handle(
+    request: Request,
+    shared: &Shared,
+    searcher: &Searcher,
+    tx: &Sender<Msg>,
+    index_path: &Path,
+) -> Result<Response> {
     Ok(match request {
-        Request::Search { query, limit, kinds } => {
-            let t = std::time::Instant::now();
-            let hits = searcher.search(&query, limit.unwrap_or(20), kinds)?;
-            Response::Hits { hits, took_ms: t.elapsed().as_secs_f64() * 1000.0 }
+        Request::Search {
+            query,
+            limit,
+            kinds,
+            quick,
+            session,
+        } => {
+            let reply = searcher.search(Query {
+                text: &query,
+                limit: limit.unwrap_or(20),
+                kinds,
+                quick,
+                session: session.as_deref(),
+            })?;
+            hits_response(reply)
         }
+        Request::Similar {
+            chunk_id,
+            limit,
+            code,
+        } => hits_response(searcher.similar(chunk_id, limit.unwrap_or(40), code)?),
+        Request::Opened { path, query: _ } => {
+            searcher.opened(&path)?;
+            Response::Ok
+        }
+        Request::Recents => Response::Recents(searcher.recents()?),
+        Request::Context { chunk_id, code } => Response::Passage(searcher.context(chunk_id, code)?),
         Request::Status => {
             let store = Store::open(index_path)?;
             Response::Status(status(shared, &store, searcher)?)
@@ -117,6 +169,19 @@ fn handle(request: Request, shared: &Shared, searcher: &Searcher, tx: &Sender<Ms
         }
         Request::Subscribe => unreachable!(),
     })
+}
+
+fn hits_response(reply: dig_client::Reply) -> Response {
+    if reply.superseded {
+        return Response::Superseded;
+    }
+    Response::Hits {
+        hits: reply.hits,
+        took_ms: reply.took_ms,
+        counts: reply.counts,
+        chips: reply.chips,
+        quick: reply.quick,
+    }
 }
 
 fn reply(writer: &mut UnixStream, response: &Response) -> Result<()> {

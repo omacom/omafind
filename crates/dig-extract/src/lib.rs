@@ -6,11 +6,13 @@
 
 pub mod classify;
 pub mod code;
+pub mod exif;
 pub mod media;
 pub mod ocr;
 pub mod office;
 pub mod pdf;
 pub mod text;
+pub mod thumbs;
 
 use std::path::{Path, PathBuf};
 
@@ -60,7 +62,16 @@ pub const FRAME_BUDGET: usize = 70;
 
 /// Whether this build reads files of `kind` (later phases add the rest).
 pub fn supported(kind: FileKind) -> bool {
-    matches!(kind, FileKind::Screenshot | FileKind::Image | FileKind::Doc | FileKind::Pdf | FileKind::Audio | FileKind::Video | FileKind::Code)
+    matches!(
+        kind,
+        FileKind::Screenshot
+            | FileKind::Image
+            | FileKind::Doc
+            | FileKind::Pdf
+            | FileKind::Audio
+            | FileKind::Video
+            | FileKind::Code
+    )
 }
 
 /// The chunks of `path`, which `classify` said is a `kind`. The file name chunk comes first so a file is always
@@ -74,13 +85,22 @@ pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
                 locator: None,
                 locator_end: None,
                 text: String::new(),
-                embed: Embed::Image { path: path.to_path_buf(), budget: SCREENSHOT_BUDGET },
+                embed: Embed::Image {
+                    path: path.to_path_buf(),
+                    budget: SCREENSHOT_BUDGET,
+                },
             });
             // Whatever text is on it, for keyword search: an error message is found by its exact words.
-            if let Ok(text) = ocr::read(path) {
-                if !text.is_empty() {
-                    chunks.push(Chunk { kind: ChunkKind::Ocr, locator: Some(0.0), locator_end: None, text, embed: Embed::None });
-                }
+            if let Ok(text) = ocr::read(path)
+                && !text.is_empty()
+            {
+                chunks.push(Chunk {
+                    kind: ChunkKind::Ocr,
+                    locator: Some(0.0),
+                    locator_end: None,
+                    text,
+                    embed: Embed::None,
+                });
             }
         }
         FileKind::Image => chunks.push(Chunk {
@@ -88,7 +108,10 @@ pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
             locator: None,
             locator_end: None,
             text: String::new(),
-            embed: Embed::Image { path: path.to_path_buf(), budget: PHOTO_BUDGET },
+            embed: Embed::Image {
+                path: path.to_path_buf(),
+                budget: PHOTO_BUDGET,
+            },
         }),
         FileKind::Doc => {
             let ext = classify::extension(path);
@@ -109,16 +132,33 @@ pub fn extract(path: &Path, kind: FileKind) -> Result<Vec<Chunk>> {
 
 /// The file's name and folder names, for keyword search only.
 fn name_chunk(path: &Path) -> Chunk {
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let folders: Vec<String> = path
         .parent()
-        .map(|p| p.components().rev().take(3).filter_map(|c| c.as_os_str().to_str().map(str::to_owned)).collect())
+        .map(|p| {
+            p.components()
+                .rev()
+                .take(3)
+                .filter_map(|c| c.as_os_str().to_str().map(str::to_owned))
+                .collect()
+        })
         .unwrap_or_default();
     Chunk {
         kind: ChunkKind::Name,
         locator: None,
         locator_end: None,
-        text: format!("{} {}", words_of(&name), folders.iter().map(|f| words_of(f)).collect::<Vec<_>>().join(" ")),
+        text: format!(
+            "{} {}",
+            words_of(&name),
+            folders
+                .iter()
+                .map(|f| words_of(f))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ),
         embed: Embed::None,
     }
 }
@@ -126,7 +166,10 @@ fn name_chunk(path: &Path) -> Chunk {
 /// `IMG_2024-07-04_beach-day.jpg` → `IMG 2024 07 04 beach day jpg IMG_2024-07-04_beach-day.jpg`: the pieces and
 /// the whole, so both "beach day" and the exact name match.
 fn words_of(name: &str) -> String {
-    let split: String = name.chars().map(|c| if c.is_alphanumeric() { c } else { ' ' }).collect();
+    let split: String = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
     let mut words: Vec<&str> = split.split_whitespace().collect();
     words.push(name);
     words.join(" ")

@@ -36,10 +36,9 @@ pub fn extract_audio(path: &Path) -> Result<Vec<Chunk>> {
 
 pub fn extract_video(path: &Path) -> Result<Vec<Chunk>> {
     let mut chunks = frames(path)?;
-    match decode_audio(path) {
-        Ok(samples) => chunks.extend(audio_windows(path, &samples)?),
-        // A silent video is fine.
-        Err(_) => {}
+    // A silent video is fine: no audio, frames only.
+    if let Ok(samples) = decode_audio(path) {
+        chunks.extend(audio_windows(path, &samples)?);
     }
     if chunks.is_empty() {
         bail!("no frames and no sound");
@@ -59,12 +58,24 @@ fn decode_audio(path: &Path) -> Result<Vec<i16>> {
         .output()
         .context("running ffmpeg")?;
     if !output.status.success() {
-        bail!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("failed"));
+        bail!(
+            "ffmpeg: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("failed")
+        );
     }
     if output.stdout.len() < 2 * SAMPLE_RATE as usize / 2 {
         bail!("no audio");
     }
-    Ok(output.stdout.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect())
+    Ok(output
+        .stdout
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16::from_le_bytes([b[0], b[1]]))
+        .collect())
 }
 
 /// Windows of `samples` as WAV files in the scratch directory, one chunk each, silent ones skipped.
@@ -104,7 +115,9 @@ fn audio_windows(path: &Path, samples: &[i16]) -> Result<Vec<Chunk>> {
 fn frames(path: &Path) -> Result<Vec<Chunk>> {
     let dir = scratch_dir().join(format!("{:016x}-frames", hash(path)));
     std::fs::create_dir_all(&dir)?;
-    let select = format!("select='gt(scene,{SCENE_THRESHOLD})+isnan(prev_selected_t)+gte(t-prev_selected_t,{FRAME_FLOOR_SECONDS})',showinfo,scale=768:-2");
+    let select = format!(
+        "select='gt(scene,{SCENE_THRESHOLD})+isnan(prev_selected_t)+gte(t-prev_selected_t,{FRAME_FLOOR_SECONDS})',showinfo,scale=768:-2"
+    );
     let output = Command::new("ffmpeg")
         .args(["-nostdin", "-v", "info", "-i"])
         .arg(path)
@@ -116,26 +129,49 @@ fn frames(path: &Path) -> Result<Vec<Chunk>> {
         .output()
         .context("running ffmpeg")?;
     if !output.status.success() {
-        bail!("ffmpeg: {}", String::from_utf8_lossy(&output.stderr).lines().last().unwrap_or("failed"));
+        bail!(
+            "ffmpeg: {}",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .last()
+                .unwrap_or("failed")
+        );
     }
     // showinfo logs one line per selected frame with its presentation time: `... n:  3 pts: 123 pts_time:4.1 ...`
     let log = String::from_utf8_lossy(&output.stderr);
     let times: Vec<f64> = log
         .lines()
         .filter(|l| l.contains("showinfo") && l.contains("pts_time:"))
-        .filter_map(|l| l.split("pts_time:").nth(1)?.split_whitespace().next()?.parse().ok())
+        .filter_map(|l| {
+            l.split("pts_time:")
+                .nth(1)?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        })
         .collect();
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?.filter_map(|e| e.ok().map(|e| e.path())).collect();
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .collect();
     files.sort();
     Ok(files
         .into_iter()
         .enumerate()
         .map(|(i, file)| Chunk {
             kind: ChunkKind::Frame,
-            locator: Some(times.get(i).copied().unwrap_or(i as f64 * FRAME_FLOOR_SECONDS)),
+            locator: Some(
+                times
+                    .get(i)
+                    .copied()
+                    .unwrap_or(i as f64 * FRAME_FLOOR_SECONDS),
+            ),
             locator_end: None,
             text: String::new(),
-            embed: Embed::Image { path: file, budget: FRAME_BUDGET },
+            embed: Embed::Image {
+                path: file,
+                budget: FRAME_BUDGET,
+            },
         })
         .collect())
 }
@@ -186,7 +222,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // 70 s: 0–35 s a tone, 35–70 s silence.
         let n = 70 * SAMPLE_RATE as usize;
-        let samples: Vec<i16> = (0..n).map(|i| if i < 35 * SAMPLE_RATE as usize { ((i as f64 * 0.1).sin() * 8000.0) as i16 } else { 0 }).collect();
+        let samples: Vec<i16> = (0..n)
+            .map(|i| {
+                if i < 35 * SAMPLE_RATE as usize {
+                    ((i as f64 * 0.1).sin() * 8000.0) as i16
+                } else {
+                    0
+                }
+            })
+            .collect();
         let chunks = audio_windows(&dir.path().join("x.wav"), &samples).unwrap();
         let starts: Vec<f64> = chunks.iter().map(|c| c.locator.unwrap()).collect();
         // Windows at 0 and 20 s hold sound; 40 s and 60 s are silent.

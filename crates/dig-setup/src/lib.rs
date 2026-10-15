@@ -13,9 +13,23 @@ use dig_core::config::Config;
 /// The folders worth offering, with what they hold (surveyed side by side, bounded).
 pub fn candidate_folders(config: &Config) -> Vec<(dig_index::survey::Survey, bool)> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let names = ["Pictures", "Documents", "Downloads", "Videos", "Music", "Desktop", "Notes", "Books", "Screenshots"];
+    let names = [
+        "Pictures",
+        "Documents",
+        "Downloads",
+        "Videos",
+        "Music",
+        "Desktop",
+        "Notes",
+        "Books",
+        "Screenshots",
+    ];
     let chosen = config.folders();
-    let mut paths: Vec<PathBuf> = names.iter().map(|n| home.join(n)).filter(|p| p.is_dir()).collect();
+    let mut paths: Vec<PathBuf> = names
+        .iter()
+        .map(|n| home.join(n))
+        .filter(|p| p.is_dir())
+        .collect();
     for extra in &chosen {
         if !paths.contains(extra) {
             paths.push(extra.clone());
@@ -25,7 +39,11 @@ pub fn candidate_folders(config: &Config) -> Vec<(dig_index::survey::Survey, boo
     surveys
         .into_iter()
         .map(|s| {
-            let default_on = chosen.is_empty() && matches!(s.path.file_name().and_then(|n| n.to_str()), Some("Pictures" | "Documents" | "Screenshots"));
+            let default_on = chosen.is_empty()
+                && matches!(
+                    s.path.file_name().and_then(|n| n.to_str()),
+                    Some("Pictures" | "Documents" | "Screenshots")
+                );
             let on = default_on || chosen.contains(&s.path);
             (s, on)
         })
@@ -35,16 +53,28 @@ pub fn candidate_folders(config: &Config) -> Vec<(dig_index::survey::Survey, boo
 /// Folders that look like where code lives, for the optional code index.
 pub fn candidate_code_folders(config: &Config) -> Vec<(dig_index::survey::Survey, bool)> {
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
-    let names = ["dev", "src", "code", "projects", "Projects", "repos", "work", "Code"];
+    let names = [
+        "dev", "src", "code", "projects", "Projects", "repos", "work", "Code",
+    ];
     let chosen = config.code_roots();
-    let mut paths: Vec<PathBuf> = names.iter().map(|n| home.join(n)).filter(|p| p.is_dir()).collect();
+    let mut paths: Vec<PathBuf> = names
+        .iter()
+        .map(|n| home.join(n))
+        .filter(|p| p.is_dir())
+        .collect();
     for extra in &chosen {
         if !paths.contains(extra) {
             paths.push(extra.clone());
         }
     }
     let surveys = dig_index::survey::survey_all(&paths, true);
-    surveys.into_iter().map(|s| { let on = chosen.contains(&s.path); (s, on) }).collect()
+    surveys
+        .into_iter()
+        .map(|s| {
+            let on = chosen.contains(&s.path);
+            (s, on)
+        })
+        .collect()
 }
 
 /// Saves the folders and tells the daemon, when it runs.
@@ -54,7 +84,10 @@ pub fn set_folders(folders: &[PathBuf], code: &[PathBuf]) -> Result<()> {
     config.save()?;
     if dig_client::Client::is_running() {
         let mut client = dig_client::Client::connect()?;
-        client.simple(&dig_client::Request::SetRoots { folders: folders.to_vec(), code: code.to_vec() })?;
+        client.simple(&dig_client::Request::SetRoots {
+            folders: folders.to_vec(),
+            code: code.to_vec(),
+        })?;
     }
     Ok(())
 }
@@ -64,8 +97,12 @@ pub fn install_unit(digd: &Path) -> Result<()> {
     if Path::new("/usr/lib/systemd/user/digd.service").exists() {
         return Ok(());
     }
-    let unit = include_str!("../../../systemd/digd.service").replace("/usr/bin/digd", &digd.to_string_lossy());
-    let dir = dig_core::paths::config_dir().parent().context("config dir")?.join("systemd/user");
+    let unit = include_str!("../../../systemd/digd.service")
+        .replace("/usr/bin/digd", &digd.to_string_lossy());
+    let dir = dig_core::paths::config_dir()
+        .parent()
+        .context("config dir")?
+        .join("systemd/user");
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("digd.service"), unit)?;
     Ok(())
@@ -74,14 +111,26 @@ pub fn install_unit(digd: &Path) -> Result<()> {
 /// Enables and starts the daemon with systemd. `digd_beside` is the daemon binary next to the caller.
 pub fn start_daemon(digd_beside: &Path) -> Result<()> {
     install_unit(digd_beside)?;
-    let ok = Command::new("systemctl").args(["--user", "daemon-reload"]).status().map(|s| s.success()).unwrap_or(false)
-        && Command::new("systemctl").args(["--user", "enable", "--now", "digd"]).status().map(|s| s.success()).unwrap_or(false);
+    let ok = Command::new("systemctl")
+        .args(["--user", "daemon-reload"])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+        && Command::new("systemctl")
+            .args(["--user", "enable", "--now", "digd"])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
     anyhow::ensure!(ok, "systemctl --user enable --now digd failed");
     Ok(())
 }
 
 pub fn daemon_enabled() -> bool {
-    Command::new("systemctl").args(["--user", "is-enabled", "digd"]).output().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled").unwrap_or(false)
+    Command::new("systemctl")
+        .args(["--user", "is-enabled", "digd"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "enabled")
+        .unwrap_or(false)
 }
 
 /// Adds the keybinding, the window rules and the autostart line (`~/.config/hypr/dig.lua`), and reloads Hyprland
@@ -90,7 +139,11 @@ pub fn install_hyprland(binding: bool, rules: bool, autostart: bool) -> Result<b
     if !(binding || rules || autostart) {
         return Ok(false);
     }
-    let changed = hypr::install(hypr::Parts { binding, rules, autostart })?;
+    let changed = hypr::install(hypr::Parts {
+        binding,
+        rules,
+        autostart,
+    })?;
     if changed {
         hypr::reload();
     }
@@ -99,11 +152,26 @@ pub fn install_hyprland(binding: bool, rules: bool, autostart: bool) -> Result<b
 
 /// Starts `dig-app` (beside the caller) if no window exists.
 pub fn start_app(app_beside: &Path) -> Result<bool> {
-    let has_window = Command::new("hyprctl").args(["-j", "clients"]).output().map(|o| String::from_utf8_lossy(&o.stdout).contains("\"class\": \"dig\"")).unwrap_or(false);
+    let has_window = Command::new("hyprctl")
+        .args(["-j", "clients"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("\"class\": \"dig\""))
+        .unwrap_or(false);
     if has_window {
         return Ok(false);
     }
-    let program = if app_beside.exists() { app_beside.to_path_buf() } else { PathBuf::from("dig-app") };
-    Command::new("setsid").arg("-f").arg(program).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn().context("starting dig-app")?;
+    let program = if app_beside.exists() {
+        app_beside.to_path_buf()
+    } else {
+        PathBuf::from("dig-app")
+    };
+    Command::new("setsid")
+        .arg("-f")
+        .arg(program)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .context("starting dig-app")?;
     Ok(true)
 }

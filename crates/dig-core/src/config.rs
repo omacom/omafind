@@ -35,7 +35,10 @@ pub struct PowerConfig {
 
 impl Default for PowerConfig {
     fn default() -> Self {
-        Self { pause_in_power_saver: true, wait_for_ac: false }
+        Self {
+            pause_in_power_saver: true,
+            wait_for_ac: false,
+        }
     }
 }
 
@@ -50,7 +53,10 @@ pub struct SearchConfig {
 
 impl Default for SearchConfig {
     fn default() -> Self {
-        Self { unload_after_minutes: 10, device: "gpu".into() }
+        Self {
+            unload_after_minutes: 10,
+            device: "gpu".into(),
+        }
     }
 }
 
@@ -65,7 +71,8 @@ impl Config {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -83,11 +90,21 @@ impl Config {
 
     /// The folders as absolute paths (missing ones dropped).
     pub fn folders(&self) -> Vec<PathBuf> {
-        self.index.folders.iter().map(|f| expand(f)).filter(|p| p.is_dir()).collect()
+        self.index
+            .folders
+            .iter()
+            .map(|f| expand(f))
+            .filter(|p| p.is_dir())
+            .collect()
     }
 
     pub fn code_roots(&self) -> Vec<PathBuf> {
-        self.index.code.iter().map(|f| expand(f)).filter(|p| p.is_dir()).collect()
+        self.index
+            .code
+            .iter()
+            .map(|f| expand(f))
+            .filter(|p| p.is_dir())
+            .collect()
     }
 
     pub fn excludes(&self) -> Vec<PathBuf> {

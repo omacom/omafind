@@ -30,7 +30,11 @@ pub fn start(roots: Vec<PathBuf>, tx: Sender<Msg>) -> notify::Result<notify::Rec
             let mut pending: HashSet<PathBuf> = HashSet::new();
             let mut last = Instant::now();
             loop {
-                let timeout = if pending.is_empty() { Duration::from_secs(3600) } else { QUIET.saturating_sub(last.elapsed()) };
+                let timeout = if pending.is_empty() {
+                    Duration::from_secs(3600)
+                } else {
+                    QUIET.saturating_sub(last.elapsed())
+                };
                 match raw_rx.recv_timeout(timeout) {
                     Ok(Ok(event)) => {
                         if !matters(&event.kind) {
@@ -39,7 +43,13 @@ pub fn start(roots: Vec<PathBuf>, tx: Sender<Msg>) -> notify::Result<notify::Rec
                         for path in event.paths {
                             // Hidden and skipped directories below a root never matter.
                             let below_root = roots.iter().find_map(|r| path.strip_prefix(r).ok());
-                            if below_root.is_none_or(|rel| rel.components().any(|c| c.as_os_str().to_str().is_some_and(dig_index::rules::skip_dir))) {
+                            if below_root.is_none_or(|rel| {
+                                rel.components().any(|c| {
+                                    c.as_os_str()
+                                        .to_str()
+                                        .is_some_and(dig_index::rules::skip_dir)
+                                })
+                            }) {
                                 continue;
                             }
                             pending.insert(path);

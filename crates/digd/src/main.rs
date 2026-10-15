@@ -17,7 +17,10 @@ use std::io::Write;
 
 /// A log line to stderr (the journal, under systemd).
 pub fn log(message: std::fmt::Arguments) {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let _ = writeln!(std::io::stderr(), "[{}] {message}", now % 86400);
 }
 
@@ -34,7 +37,9 @@ fn main() {
             println!("digd {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Some(other) => Err(anyhow::anyhow!("unknown argument {other}; usage: digd [--worker]")),
+        Some(other) => Err(anyhow::anyhow!(
+            "unknown argument {other}; usage: digd [--worker]"
+        )),
         None => daemon::main(),
     };
     if let Err(error) = result {

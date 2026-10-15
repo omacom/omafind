@@ -35,8 +35,11 @@ pub struct Fused {
 
 /// How far above the modality's mean a vector hit must sit, in standard deviations.
 pub const Z_GATE: f64 = 1.5;
-/// Vector hits that stay regardless of the gate.
+/// Vector hits that stay regardless of the gate, when they are close to the best: a sparse index (or a filter down to
+/// a few files) still answers, without padding the answer with whatever happens to be nearest.
 pub const ALWAYS_KEEP: usize = 3;
+/// How close to the best similarity an always-kept hit must be.
+pub const KEEP_WITHIN: f64 = 0.04;
 /// RRF's smoothing constant.
 const RRF_K: f64 = 60.0;
 const ALL_WORDS_BONUS: f64 = 0.01;
@@ -45,7 +48,10 @@ const ALL_WORDS_BONUS: f64 = 0.01;
 pub fn gate(hits: &[VectorHit]) -> Vec<VectorHit> {
     let mut by_modality: HashMap<Modality, Vec<f64>> = HashMap::new();
     for hit in hits {
-        by_modality.entry(hit.modality).or_default().push(hit.similarity as f64);
+        by_modality
+            .entry(hit.modality)
+            .or_default()
+            .push(hit.similarity as f64);
     }
     let stats: HashMap<Modality, (f64, f64)> = by_modality
         .into_iter()
@@ -57,12 +63,17 @@ pub fn gate(hits: &[VectorHit]) -> Vec<VectorHit> {
         })
         .collect();
     let mut sorted: Vec<VectorHit> = hits.to_vec();
-    sorted.sort_by(|a, b| b.similarity.partial_cmp(&a.similarity).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        b.similarity
+            .partial_cmp(&a.similarity)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let best = sorted.first().map_or(0.0, |h| h.similarity as f64);
     sorted
         .into_iter()
         .enumerate()
         .filter(|(rank, hit)| {
-            if *rank < ALWAYS_KEEP {
+            if *rank == 0 || (*rank < ALWAYS_KEEP && hit.similarity as f64 >= best - KEEP_WITHIN) {
                 return true;
             }
             let (mean, sd) = stats[&hit.modality];
@@ -77,10 +88,23 @@ pub fn gate(hits: &[VectorHit]) -> Vec<VectorHit> {
 /// the query's words that appear in that chunk (0..=1): a keyword hit counts in proportion to it, so one common
 /// word doesn't weigh as much as the whole phrase, and a chunk with every word earns a small bonus that breaks ties
 /// toward exact matches.
-pub fn fuse(vector: &[VectorHit], keywords: &[KeywordHit], word_share: impl Fn(i64) -> f64) -> Vec<Fused> {
+///
+/// `names` are files whose name holds every word as typed (half a word included), a list of its own in the fusion:
+/// someone typing `lease-20` wants `lease-2024.pdf` even when no whole word matched yet.
+pub fn fuse(
+    vector: &[VectorHit],
+    keywords: &[KeywordHit],
+    names: &[KeywordHit],
+    word_share: impl Fn(i64) -> f64,
+) -> Vec<Fused> {
     let mut scores: HashMap<i64, Fused> = HashMap::new();
     for (rank, hit) in vector.iter().enumerate() {
-        let entry = scores.entry(hit.chunk_id).or_insert(Fused { chunk_id: hit.chunk_id, score: 0.0, similarity: None, from_keywords: false });
+        let entry = scores.entry(hit.chunk_id).or_insert(Fused {
+            chunk_id: hit.chunk_id,
+            score: 0.0,
+            similarity: None,
+            from_keywords: false,
+        });
         entry.score += 1.0 / (RRF_K + rank as f64 + 1.0);
         entry.similarity = Some(hit.similarity);
     }
@@ -89,8 +113,23 @@ pub fn fuse(vector: &[VectorHit], keywords: &[KeywordHit], word_share: impl Fn(i
         if share <= 0.0 {
             continue;
         }
-        let entry = scores.entry(hit.chunk_id).or_insert(Fused { chunk_id: hit.chunk_id, score: 0.0, similarity: None, from_keywords: false });
+        let entry = scores.entry(hit.chunk_id).or_insert(Fused {
+            chunk_id: hit.chunk_id,
+            score: 0.0,
+            similarity: None,
+            from_keywords: false,
+        });
         entry.score += share * share / (RRF_K + rank as f64 + 1.0);
+        entry.from_keywords = true;
+    }
+    for (rank, hit) in names.iter().enumerate() {
+        let entry = scores.entry(hit.chunk_id).or_insert(Fused {
+            chunk_id: hit.chunk_id,
+            score: 0.0,
+            similarity: None,
+            from_keywords: false,
+        });
+        entry.score += 1.0 / (RRF_K + rank as f64 + 1.0);
         entry.from_keywords = true;
     }
     let mut fused: Vec<Fused> = scores.into_values().collect();
@@ -99,7 +138,11 @@ pub fn fuse(vector: &[VectorHit], keywords: &[KeywordHit], word_share: impl Fn(i
             hit.score += ALL_WORDS_BONUS;
         }
     }
-    fused.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    fused.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     fused
 }
 
@@ -107,11 +150,17 @@ pub fn fuse(vector: &[VectorHit], keywords: &[KeywordHit], word_share: impl Fn(i
 /// photo whose name also matches outranks one that matched only by picture. The entry keeps the best *content*
 /// chunk (not the file-name chunk) when one scored at least half as well, so the locator and snippet point at
 /// something inside the file. `file_of` maps a chunk to its file; `is_name` says whether a chunk is the name.
-pub fn collapse(fused: Vec<Fused>, file_of: impl Fn(i64) -> Option<i64>, is_name: impl Fn(i64) -> bool) -> Vec<Fused> {
+pub fn collapse(
+    fused: Vec<Fused>,
+    file_of: impl Fn(i64) -> Option<i64>,
+    is_name: impl Fn(i64) -> bool,
+) -> Vec<Fused> {
     let mut per_file: Vec<(i64, Vec<Fused>)> = Vec::new();
     let mut index: HashMap<i64, usize> = HashMap::new();
     for hit in fused {
-        let Some(file) = file_of(hit.chunk_id) else { continue };
+        let Some(file) = file_of(hit.chunk_id) else {
+            continue;
+        };
         match index.get(&file) {
             Some(&i) => per_file[i].1.push(hit),
             None => {
@@ -130,11 +179,22 @@ pub fn collapse(fused: Vec<Fused>, file_of: impl Fn(i64) -> Option<i64>, is_name
                 .iter()
                 .find(|h| !is_name(h.chunk_id) && h.score >= best * 0.5)
                 .unwrap_or(&hits[0]);
-            let similarity = representative.similarity.or_else(|| hits.iter().find_map(|h| h.similarity));
-            Fused { chunk_id: representative.chunk_id, score, similarity, from_keywords: hits.iter().any(|h| h.from_keywords) }
+            let similarity = representative
+                .similarity
+                .or_else(|| hits.iter().find_map(|h| h.similarity));
+            Fused {
+                chunk_id: representative.chunk_id,
+                score,
+                similarity,
+                from_keywords: hits.iter().any(|h| h.from_keywords),
+            }
         })
         .collect();
-    out.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    out.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     out
 }
 
@@ -149,13 +209,102 @@ pub fn word_share(words: &[String], text: &str) -> f64 {
 
 /// Words that say nothing about what is being looked for. Matching them would make every document a keyword hit.
 const STOPWORDS: &[&str] = &[
-    "a", "an", "the", "and", "or", "of", "in", "on", "at", "to", "for", "with", "by", "from", "about", "as", "is", "are",
-    "was", "were", "be", "it", "its", "this", "that", "these", "those", "my", "me", "i", "we", "our", "you", "your", "they",
-    "them", "their", "he", "she", "his", "her", "where", "when", "what", "which", "who", "how", "do", "does", "did", "have",
-    "has", "had", "not", "no", "so", "if", "then", "than", "there", "here", "into", "over", "under", "up", "down", "out",
-    "some", "any", "all", "one", "two", "talk", "talks", "talking", "say", "says", "said", "like", "thing", "things",
-    "something", "someone", "find", "show", "get", "picture", "photo", "image", "file", "files", "document", "video",
-    "recording", "clip", "page",
+    "a",
+    "an",
+    "the",
+    "and",
+    "or",
+    "of",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "with",
+    "by",
+    "from",
+    "about",
+    "as",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "it",
+    "its",
+    "this",
+    "that",
+    "these",
+    "those",
+    "my",
+    "me",
+    "i",
+    "we",
+    "our",
+    "you",
+    "your",
+    "they",
+    "them",
+    "their",
+    "he",
+    "she",
+    "his",
+    "her",
+    "where",
+    "when",
+    "what",
+    "which",
+    "who",
+    "how",
+    "do",
+    "does",
+    "did",
+    "have",
+    "has",
+    "had",
+    "not",
+    "no",
+    "so",
+    "if",
+    "then",
+    "than",
+    "there",
+    "here",
+    "into",
+    "over",
+    "under",
+    "up",
+    "down",
+    "out",
+    "some",
+    "any",
+    "all",
+    "one",
+    "two",
+    "talk",
+    "talks",
+    "talking",
+    "say",
+    "says",
+    "said",
+    "like",
+    "thing",
+    "things",
+    "something",
+    "someone",
+    "find",
+    "show",
+    "get",
+    "picture",
+    "photo",
+    "image",
+    "file",
+    "files",
+    "document",
+    "video",
+    "recording",
+    "clip",
+    "page",
 ];
 
 /// The words of a query, lowercased, for keyword search, the all-words bonus and snippet highlighting. Stopwords
@@ -163,10 +312,17 @@ const STOPWORDS: &[&str] = &[
 pub fn query_words(query: &str) -> Vec<String> {
     let all: Vec<String> = query
         .split(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-' && c != '_' && c != '.')
-        .map(|w| w.trim_matches(|c: char| c == '\'' || c == '-' || c == '.').to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| c == '\'' || c == '-' || c == '.')
+                .to_lowercase()
+        })
         .filter(|w| w.chars().count() >= 2 && w != "code:")
         .collect();
-    let content: Vec<String> = all.iter().filter(|w| !STOPWORDS.contains(&w.as_str())).cloned().collect();
+    let content: Vec<String> = all
+        .iter()
+        .filter(|w| !STOPWORDS.contains(&w.as_str()))
+        .cloned()
+        .collect();
     if content.is_empty() { all } else { content }
 }
 
@@ -222,7 +378,11 @@ pub fn snippet(text: &str, words: &[String], width: usize) -> String {
     let center = best.map(|(_, at)| at).unwrap_or(0);
     let start = center.saturating_sub(width / 4);
     let end = (start + width).min(chars.len());
-    let start = if end == chars.len() { end.saturating_sub(width) } else { start };
+    let start = if end == chars.len() {
+        end.saturating_sub(width)
+    } else {
+        start
+    };
     let mut out: String = chars[start..end].iter().collect();
     if start > 0 {
         out = format!("…{}", out.trim_start());
@@ -238,22 +398,40 @@ mod tests {
     use super::*;
 
     fn hit(id: i64, sim: f32) -> VectorHit {
-        VectorHit { chunk_id: id, similarity: sim, modality: Modality::Image }
+        VectorHit {
+            chunk_id: id,
+            similarity: sim,
+            modality: Modality::Image,
+        }
     }
 
     #[test]
     fn gate_keeps_what_stands_out() {
-        let hits = [hit(1, 0.73), hit(2, 0.59), hit(3, 0.55), hit(4, 0.55), hit(5, 0.55), hit(6, 0.54), hit(7, 0.49)];
+        let hits = [
+            hit(1, 0.73),
+            hit(2, 0.59),
+            hit(3, 0.55),
+            hit(4, 0.55),
+            hit(5, 0.55),
+            hit(6, 0.54),
+            hit(7, 0.49),
+        ];
         let kept = gate(&hits);
-        // The top three always stay; the rest are within the noise.
-        assert_eq!(kept.iter().map(|h| h.chunk_id).collect::<Vec<_>>(), vec![1, 2, 3]);
+        // The best stays; the rest are within the noise.
+        assert_eq!(kept.iter().map(|h| h.chunk_id).collect::<Vec<_>>(), vec![1]);
+        // Close seconds stay with it in a sparse list.
+        let hits = [hit(1, 0.63), hit(2, 0.617), hit(3, 0.587)];
+        assert_eq!(
+            gate(&hits).iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
     }
 
     #[test]
     fn fusion_prefers_a_hit_in_both_lists() {
         let vector = [hit(1, 0.7), hit(2, 0.65)];
         let keywords = [KeywordHit { chunk_id: 2 }, KeywordHit { chunk_id: 3 }];
-        let fused = fuse(&vector, &keywords, |_| 1.0);
+        let fused = fuse(&vector, &keywords, &[], |_| 1.0);
         assert_eq!(fused[0].chunk_id, 2);
         assert!(fused[0].from_keywords && fused[0].similarity.is_some());
     }
@@ -261,17 +439,45 @@ mod tests {
     #[test]
     fn collapse_keeps_one_chunk_per_file() {
         let fused = vec![
-            Fused { chunk_id: 1, score: 3.0, similarity: None, from_keywords: false },
-            Fused { chunk_id: 2, score: 2.0, similarity: None, from_keywords: false },
-            Fused { chunk_id: 3, score: 1.0, similarity: None, from_keywords: false },
+            Fused {
+                chunk_id: 1,
+                score: 3.0,
+                similarity: None,
+                from_keywords: false,
+            },
+            Fused {
+                chunk_id: 2,
+                score: 2.0,
+                similarity: None,
+                from_keywords: false,
+            },
+            Fused {
+                chunk_id: 3,
+                score: 1.0,
+                similarity: None,
+                from_keywords: false,
+            },
         ];
         let out = collapse(fused, |c| Some(if c == 2 { 1 } else { c }), |_| false);
-        assert_eq!(out.iter().map(|h| h.chunk_id).collect::<Vec<_>>(), vec![1, 3]);
+        assert_eq!(
+            out.iter().map(|h| h.chunk_id).collect::<Vec<_>>(),
+            vec![1, 3]
+        );
         // Two hits on one file add up, and the content chunk represents the file over its name chunk.
         assert_eq!(out[0].score, 4.0);
         let fused = vec![
-            Fused { chunk_id: 10, score: 1.0, similarity: None, from_keywords: true },
-            Fused { chunk_id: 11, score: 0.9, similarity: Some(0.7), from_keywords: false },
+            Fused {
+                chunk_id: 10,
+                score: 1.0,
+                similarity: None,
+                from_keywords: true,
+            },
+            Fused {
+                chunk_id: 11,
+                score: 0.9,
+                similarity: Some(0.7),
+                from_keywords: false,
+            },
         ];
         let out = collapse(fused, |_| Some(1), |c| c == 10);
         assert_eq!((out[0].chunk_id, out[0].similarity), (11, Some(0.7)));
@@ -279,22 +485,38 @@ mod tests {
 
     #[test]
     fn stopwords_are_dropped_unless_nothing_remains() {
-        assert_eq!(query_words("the clause about pets in the lease"), vec!["clause", "pets", "lease"]);
+        assert_eq!(
+            query_words("the clause about pets in the lease"),
+            vec!["clause", "pets", "lease"]
+        );
         assert_eq!(query_words("a dog on the beach"), vec!["dog", "beach"]);
-        assert_eq!(query_words("where they talk about it"), vec!["where", "they", "talk", "about", "it"]);
-        assert_eq!(query_words("INV-20394 DO_NOT_HONOR v1.2"), vec!["inv-20394", "do_not_honor", "v1.2"]);
+        assert_eq!(
+            query_words("where they talk about it"),
+            vec!["where", "they", "talk", "about", "it"]
+        );
+        assert_eq!(
+            query_words("INV-20394 DO_NOT_HONOR v1.2"),
+            vec!["inv-20394", "do_not_honor", "v1.2"]
+        );
     }
 
     #[test]
     fn snippets_center_where_the_words_cluster() {
-        let text = "a ".repeat(100) + "the clause about pets in the lease says " + &"b ".repeat(100);
+        let text =
+            "a ".repeat(100) + "the clause about pets in the lease says " + &"b ".repeat(100);
         let s = snippet(&text, &query_words("pets lease"), 60);
         assert!(s.contains("pets"), "{s}");
         assert!(s.starts_with('…') && s.ends_with('…'));
         // "lease" alone appears early; "pets" and "lease" together appear later: the pair wins.
-        let text = "Residential Lease Agreement. ".to_owned() + &"x ".repeat(200) + "Tenants may keep pets under the lease. " + &"y ".repeat(50);
+        let text = "Residential Lease Agreement. ".to_owned()
+            + &"x ".repeat(200)
+            + "Tenants may keep pets under the lease. "
+            + &"y ".repeat(50);
         let s = snippet(&text, &query_words("pets in the lease"), 80);
         assert!(s.contains("pets"), "{s}");
-        assert_eq!(query_words("Payment DECLINED error!"), vec!["payment", "declined", "error"]);
+        assert_eq!(
+            query_words("Payment DECLINED error!"),
+            vec!["payment", "declined", "error"]
+        );
     }
 }

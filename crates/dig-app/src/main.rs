@@ -10,7 +10,6 @@
 mod actions;
 mod hypr;
 mod theme;
-mod thumbs;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -18,8 +17,13 @@ use std::time::{Duration, Instant};
 
 use dig_client::{Client, Request, Status};
 use dig_core::{FileKind, Locator};
-use gpui_kit::{App, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size};
-use gpui_shell::{AppAssets, Capabilities, HostError, HostModule, HostObject, HostValue, ShellRuntime};
+use dig_extract::thumbs;
+use gpui_kit::{
+    App, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size,
+};
+use gpui_shell::{
+    AppAssets, Capabilities, HostError, HostModule, HostObject, HostValue, ShellRuntime,
+};
 
 const DIG_TYPES: &str = r#"
 /** One search hit: a file, and where in it the match is. */
@@ -39,8 +43,33 @@ export interface Result {
   score: number;
   similarity: number | null;
   matchedWords: string[];
+  /** What matched: "picture", "sound", "text", "name" or "words". */
+  reason: string;
+  /** Modification time, unix seconds; size in bytes. */
+  mtime: number;
+  size: number;
+  /** The containing folder, home shortened. */
+  folder: string;
+  /** Near-duplicates folded into this result (copies, crops, edits, bursts), by path. */
+  duplicates: string[];
 }
-export interface Answer { query: string; results: Result[]; tookMs: number }
+export interface Chip { key: string; label: string }
+export interface Answer {
+  query: string;
+  results: Result[];
+  tookMs: number;
+  /** Files per kind in the unfiltered list, for the filter chips. */
+  counts: Record<string, number>;
+  /** The filters read out of the query. */
+  chips: Chip[];
+  /** Names and keywords only, before the model answered. */
+  quick: boolean;
+  /** A newer search of the same session came first: ignore this one. */
+  superseded: boolean;
+}
+export interface Recents { searches: { query: string; at: number }[]; opened: Result[]; added: Result[] }
+export interface Passage { text: string; before: string; after: string }
+export interface Line { n: number; text: string }
 export interface Root { path: string; code: boolean }
 export interface Status {
   /** Whether digd answers. */
@@ -56,10 +85,25 @@ export interface Status {
   current: string | null;
   paused: boolean; onBattery: boolean; powerSaver: boolean; queryEncoderLoaded: boolean;
   roots: Root[];
+  /** Per kind: indexed and total. */
+  kinds: { kind: string; indexed: number; total: number }[];
+  /** Seconds left, once there is a rate. */
+  eta: number | null;
 }
-export function search(query: string, options?: { limit?: number; kinds?: string[] }): Promise<Answer>;
-/** The small picture for a result, made on demand; null when the kind has none. */
-export function thumb(path: string, kind: string, locator: number | null): Promise<string | null>;
+export function search(query: string, options?: { limit?: number; kinds?: string[]; quick?: boolean; session?: string }): Promise<Answer>;
+/** Files like this result ("more like this"). */
+export function similar(id: number, options?: { code?: boolean; limit?: number }): Promise<Answer>;
+export function recents(): Promise<Recents>;
+/** The matched passage in full, with its neighbours. */
+export function passage(id: number, code?: boolean): Promise<Passage>;
+/** Lines `from`..=`to` of a text file (code previews). */
+export function lines(path: string, from: number, to: number): Promise<Line[]>;
+/** The picture for a result: "small" (rows, grid) or "large" (preview); null when the kind has none. */
+export function thumb(path: string, kind: string, locator: number | null, size?: "small" | "large"): Promise<string | null>;
+/** Moves the file to the trash. */
+export function trash(path: string): boolean;
+/** Puts text on the clipboard. */
+export function copyText(text: string): boolean;
 export function status(): Status;
 export function open(path: string, kind: string, locator: number | null): boolean;
 export function reveal(path: string): boolean;
@@ -97,7 +141,9 @@ impl AssetSource for DigAssets {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let candidate = Path::new(path);
         if candidate.is_absolute() {
-            let Ok(full) = candidate.canonicalize() else { return Ok(None) };
+            let Ok(full) = candidate.canonicalize() else {
+                return Ok(None);
+            };
             if !full.starts_with(&self.thumbs) {
                 return Ok(None);
             }
@@ -134,7 +180,7 @@ fn note(note: Note) {
 type Shared = Arc<Mutex<State>>;
 
 enum Note {
-    Status(Status),
+    Status(Box<Status>),
     Daemon(bool),
     Shown,
     Hidden,
@@ -159,13 +205,90 @@ fn hit_value(hit: &dig_core::Hit) -> HostValue {
         .field("name", hit.name.as_str())
         .field("kind", hit.kind.as_str())
         .field("chunkKind", hit.chunk_kind.as_str())
-        .field("locator", hit.locator.map(|l| HostValue::Number(l.value())).unwrap_or(HostValue::Null))
+        .field(
+            "locator",
+            hit.locator
+                .map(|l| HostValue::Number(l.value()))
+                .unwrap_or(HostValue::Null),
+        )
         .field("locatorLabel", hit.locator_label.as_str())
         .field("snippet", hit.snippet.as_str())
         .field("score", hit.score)
-        .field("similarity", hit.similarity.map(|s| HostValue::Number(s as f64)).unwrap_or(HostValue::Null))
-        .field("matchedWords", HostValue::Array(hit.matched_words.iter().map(|w| HostValue::from(w.as_str())).collect()))
+        .field(
+            "similarity",
+            hit.similarity
+                .map(|s| HostValue::Number(s as f64))
+                .unwrap_or(HostValue::Null),
+        )
+        .field(
+            "matchedWords",
+            HostValue::Array(
+                hit.matched_words
+                    .iter()
+                    .map(|w| HostValue::from(w.as_str()))
+                    .collect(),
+            ),
+        )
+        .field("reason", hit.reason.as_str())
+        .field("mtime", hit.mtime as f64)
+        .field("size", hit.size as f64)
+        .field(
+            "folder",
+            Path::new(&hit.path)
+                .parent()
+                .map(dig_core::paths::tilde)
+                .unwrap_or_default(),
+        )
+        .field(
+            "duplicates",
+            HostValue::Array(
+                hit.duplicates
+                    .iter()
+                    .map(|p| HostValue::from(p.as_str()))
+                    .collect(),
+            ),
+        )
         .into()
+}
+
+fn reply_value(query: String, reply: &dig_client::Reply, started: Instant) -> HostValue {
+    let mut counts = HostObject::new();
+    for (kind, n) in &reply.counts {
+        counts = counts.field(kind.as_str(), *n as f64);
+    }
+    HostObject::new()
+        .field("query", query)
+        .field(
+            "results",
+            HostValue::Array(reply.hits.iter().map(hit_value).collect()),
+        )
+        .field("tookMs", started.elapsed().as_secs_f64() * 1000.0)
+        .field("counts", counts)
+        .field(
+            "chips",
+            HostValue::Array(
+                reply
+                    .chips
+                    .iter()
+                    .map(|c| {
+                        HostObject::new()
+                            .field("key", c.key.as_str())
+                            .field("label", c.label.as_str())
+                            .into()
+                    })
+                    .collect(),
+            ),
+        )
+        .field("quick", reply.quick)
+        .field("superseded", reply.superseded)
+        .into()
+}
+
+fn number(value: Option<&HostValue>) -> Option<f64> {
+    match value {
+        Some(HostValue::Number(n)) => Some(*n),
+        _ => None,
+    }
 }
 
 fn status_value(state: &State) -> HostValue {
@@ -174,18 +297,70 @@ fn status_value(state: &State) -> HostValue {
         .field("daemon", state.daemon)
         .field("visible", state.visible)
         .field("shown", state.shown as f64)
-        .field("configured", dig_core::config::Config::load().map(|c| !c.folders().is_empty() || !c.code_roots().is_empty()).unwrap_or(false))
-        .field("state", if state.daemon { s.state.as_str() } else { "no_daemon" })
+        .field(
+            "configured",
+            dig_core::config::Config::load()
+                .map(|c| !c.folders().is_empty() || !c.code_roots().is_empty())
+                .unwrap_or(false),
+        )
+        .field(
+            "state",
+            if state.daemon {
+                s.state.as_str()
+            } else {
+                "no_daemon"
+            },
+        )
         .field("files", s.files as f64)
         .field("indexed", s.indexed as f64)
         .field("pending", s.pending as f64)
         .field("failed", s.failed as f64)
-        .field("current", s.current.as_deref().map(|c| HostValue::from(dig_core::paths::tilde(Path::new(c)))).unwrap_or(HostValue::Null))
+        .field(
+            "current",
+            s.current
+                .as_deref()
+                .map(|c| HostValue::from(dig_core::paths::tilde(Path::new(c))))
+                .unwrap_or(HostValue::Null),
+        )
         .field("paused", s.paused)
         .field("onBattery", s.on_battery)
         .field("powerSaver", s.power_saver)
         .field("queryEncoderLoaded", s.query_encoder_loaded)
-        .field("roots", HostValue::Array(s.roots.iter().map(|r| HostObject::new().field("path", dig_core::paths::tilde(&r.path)).field("code", r.code).into()).collect()))
+        .field(
+            "roots",
+            HostValue::Array(
+                s.roots
+                    .iter()
+                    .map(|r| {
+                        HostObject::new()
+                            .field("path", dig_core::paths::tilde(&r.path))
+                            .field("code", r.code)
+                            .into()
+                    })
+                    .collect(),
+            ),
+        )
+        .field(
+            "kinds",
+            HostValue::Array(
+                s.kinds
+                    .iter()
+                    .map(|(k, done, total)| {
+                        HostObject::new()
+                            .field("kind", k.as_str())
+                            .field("indexed", *done as f64)
+                            .field("total", *total as f64)
+                            .into()
+                    })
+                    .collect(),
+            ),
+        )
+        .field(
+            "eta",
+            s.eta_seconds
+                .map(HostValue::Number)
+                .unwrap_or(HostValue::Null),
+        )
         .into()
 }
 
@@ -201,7 +376,13 @@ fn folder_value(survey: &dig_index::survey::Survey, selected: bool) -> HostValue
 
 fn strings(value: Option<&HostValue>) -> Vec<String> {
     match value {
-        Some(HostValue::Array(items)) => items.iter().filter_map(|i| match i { HostValue::Str(s) => Some(s.clone()), _ => None }).collect(),
+        Some(HostValue::Array(items)) => items
+            .iter()
+            .filter_map(|i| match i {
+                HostValue::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect(),
         _ => Vec::new(),
     }
 }
@@ -215,7 +396,10 @@ fn dig_module(shared: Shared) -> HostModule {
     HostModule::new("dig")
         .function("setupProgress", move |_| {
             Ok(match &for_progress.lock().unwrap().setup_progress {
-                Some((message, fraction)) => HostObject::new().field("message", message.as_str()).field("fraction", *fraction).into(),
+                Some((message, fraction)) => HostObject::new()
+                    .field("message", message.as_str())
+                    .field("fraction", *fraction)
+                    .into(),
                 None => HostValue::Null,
             })
         })
@@ -239,10 +423,35 @@ fn dig_module(shared: Shared) -> HostModule {
                         let hypr = dig_setup::hypr::installed();
                         HostValue::from(
                             HostObject::new()
-                                .field("folders", HostValue::Array(folders.iter().map(|(s, on)| folder_value(s, *on)).collect()))
-                                .field("code", HostValue::Array(code.iter().map(|(s, on)| folder_value(s, *on)).collect()))
-                                .field("textModel", dig_setup::download::present(&models, &dig_setup::download::TEXT))
-                                .field("mediaModel", dig_setup::download::present(&models, &dig_setup::download::MEDIA))
+                                .field(
+                                    "folders",
+                                    HostValue::Array(
+                                        folders
+                                            .iter()
+                                            .map(|(s, on)| folder_value(s, *on))
+                                            .collect(),
+                                    ),
+                                )
+                                .field(
+                                    "code",
+                                    HostValue::Array(
+                                        code.iter().map(|(s, on)| folder_value(s, *on)).collect(),
+                                    ),
+                                )
+                                .field(
+                                    "textModel",
+                                    dig_setup::download::present(
+                                        &models,
+                                        &dig_setup::download::TEXT,
+                                    ),
+                                )
+                                .field(
+                                    "mediaModel",
+                                    dig_setup::download::present(
+                                        &models,
+                                        &dig_setup::download::MEDIA,
+                                    ),
+                                )
                                 .field("daemonEnabled", dig_setup::daemon_enabled())
                                 .field("binding", hypr.binding)
                                 .field("rules", hypr.rules)
@@ -264,12 +473,27 @@ fn dig_module(shared: Shared) -> HostModule {
                             if dig_setup::download::present(&models, file) {
                                 continue;
                             }
-                            let name = if file.name == dig_core::model::TEXT_FILE { "text model" } else { "image and audio encoders" };
+                            let name = if file.name == dig_core::model::TEXT_FILE {
+                                "text model"
+                            } else {
+                                "image and audio encoders"
+                            };
                             let shared2 = shared.clone();
-                            let outcome = dig_setup::download::fetch_with(&models, file, &mut |done, total| {
-                                shared2.lock().unwrap().setup_progress = Some((format!("Downloading the {name} ({} of {} MB)", done / 1_000_000, total / 1_000_000), done as f64 / total.max(1) as f64));
-                                note(Note::Refresh);
-                            });
+                            let outcome = dig_setup::download::fetch_with(
+                                &models,
+                                file,
+                                &mut |done, total| {
+                                    shared2.lock().unwrap().setup_progress = Some((
+                                        format!(
+                                            "Downloading the {name} ({} of {} MB)",
+                                            done / 1_000_000,
+                                            total / 1_000_000
+                                        ),
+                                        done as f64 / total.max(1) as f64,
+                                    ));
+                                    note(Note::Refresh);
+                                },
+                            );
                             shared.lock().unwrap().setup_progress = None;
                             note(Note::Refresh);
                             outcome?;
@@ -285,17 +509,37 @@ fn dig_module(shared: Shared) -> HostModule {
         })
         .async_function("applySetup", |arguments| {
             let options = arguments.get(0);
-            let folders: Vec<PathBuf> = strings(options.and_then(|o| o.get("folders"))).into_iter().map(PathBuf::from).collect();
-            let code: Vec<PathBuf> = strings(options.and_then(|o| o.get("code"))).into_iter().map(PathBuf::from).collect();
-            let hyprland = options.and_then(|o| o.get("hyprland")).map(|v| matches!(v, HostValue::Bool(true))).unwrap_or(true);
-            let autostart = options.and_then(|o| o.get("autostart")).map(|v| matches!(v, HostValue::Bool(true))).unwrap_or(true);
+            let folders: Vec<PathBuf> = strings(options.and_then(|o| o.get("folders")))
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+            let code: Vec<PathBuf> = strings(options.and_then(|o| o.get("code")))
+                .into_iter()
+                .map(PathBuf::from)
+                .collect();
+            let hyprland = options
+                .and_then(|o| o.get("hyprland"))
+                .map(|v| matches!(v, HostValue::Bool(true)))
+                .unwrap_or(true);
+            let autostart = options
+                .and_then(|o| o.get("autostart"))
+                .map(|v| matches!(v, HostValue::Bool(true)))
+                .unwrap_or(true);
             let executor = with_app(|cx| cx.background_executor().clone())?;
             Ok(async move {
                 let result = executor
                     .spawn(async move {
                         let mut done = Vec::new();
                         dig_setup::set_folders(&folders, &code)?;
-                        done.push(format!("indexing {} folder{}", folders.len() + code.len(), if folders.len() + code.len() == 1 { "" } else { "s" }));
+                        done.push(format!(
+                            "indexing {} folder{}",
+                            folders.len() + code.len(),
+                            if folders.len() + code.len() == 1 {
+                                ""
+                            } else {
+                                "s"
+                            }
+                        ));
                         if !Client::is_running() || !dig_setup::daemon_enabled() {
                             let digd = std::env::current_exe()?.with_file_name("digd");
                             dig_setup::start_daemon(&digd)?;
@@ -314,46 +558,213 @@ fn dig_module(shared: Shared) -> HostModule {
             })
         })
         .declarations(DIG_TYPES)
-        .function("status", move |_| Ok(status_value(&for_status.lock().unwrap())))
+        .function("status", move |_| {
+            Ok(status_value(&for_status.lock().unwrap()))
+        })
         .async_function("search", move |arguments| {
             let query = arguments.string(0)?.to_owned();
             let options = arguments.get(1);
-            let limit = options.and_then(|o| o.get("limit")).and_then(|v| match v { HostValue::Number(n) => Some(*n as usize), _ => None }).unwrap_or(30);
+            let limit = number(options.and_then(|o| o.get("limit")))
+                .map(|n| n as usize)
+                .unwrap_or(40);
+            let quick = matches!(
+                options.and_then(|o| o.get("quick")),
+                Some(HostValue::Bool(true))
+            );
+            let session = match options.and_then(|o| o.get("session")) {
+                Some(HostValue::Str(s)) => Some(s.to_string()),
+                _ => None,
+            };
             let kinds: Vec<FileKind> = options
                 .and_then(|o| o.get("kinds"))
-                .and_then(|v| match v { HostValue::Array(items) => Some(items.iter().filter_map(|i| match i { HostValue::Str(s) => FileKind::parse(s), _ => None }).collect()), _ => None })
+                .and_then(|v| match v {
+                    HostValue::Array(items) => Some(
+                        items
+                            .iter()
+                            .filter_map(|i| match i {
+                                HostValue::Str(s) => FileKind::parse(s),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                })
                 .unwrap_or_default();
-            for_search.lock().unwrap().query_words = dig_core::ranking::query_words(&query);
+            for_search.lock().unwrap().query_words =
+                dig_core::ranking::query_words(&dig_core::query::parse(&query).text);
             let executor = with_app(|cx| cx.background_executor().clone())?;
-            tracing::info!("search {query:?}");
             Ok(async move {
                 let started = Instant::now();
-                let ((hits, _took), query) = executor
-                    .spawn(async move { Client::connect().and_then(|mut c| c.search(&query, limit, kinds)).map(|r| (r, query)) })
+                let request = Request::Search {
+                    query: query.clone(),
+                    limit: Some(limit),
+                    kinds,
+                    quick,
+                    session,
+                };
+                let reply = executor
+                    .spawn(
+                        async move { Client::connect().and_then(|mut c| c.search_with(&request)) },
+                    )
                     .await
                     .map_err(|e| HostError::new(format!("{e:#}")))?;
-                tracing::info!("search {query:?}: {} hits in {:.0} ms", hits.len(), started.elapsed().as_secs_f64() * 1000.0);
+                if !quick && !reply.superseded {
+                    tracing::info!(
+                        "search {query:?}: {} hits in {:.0} ms",
+                        reply.hits.len(),
+                        started.elapsed().as_secs_f64() * 1000.0
+                    );
+                }
+                Ok(reply_value(query, &reply, started))
+            })
+        })
+        .async_function("similar", |arguments| {
+            let id = arguments
+                .get(0)
+                .and_then(|v| match v {
+                    HostValue::Number(n) => Some(*n as i64),
+                    _ => None,
+                })
+                .ok_or_else(|| HostError::new("similar(id)"))?;
+            let options = arguments.get(1);
+            let code = matches!(
+                options.and_then(|o| o.get("code")),
+                Some(HostValue::Bool(true))
+            );
+            let limit = number(options.and_then(|o| o.get("limit")))
+                .map(|n| n as usize)
+                .unwrap_or(40);
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let started = Instant::now();
+                let request = Request::Similar {
+                    chunk_id: id,
+                    limit: Some(limit),
+                    code,
+                };
+                let reply = executor
+                    .spawn(
+                        async move { Client::connect().and_then(|mut c| c.search_with(&request)) },
+                    )
+                    .await
+                    .map_err(|e| HostError::new(format!("{e:#}")))?;
+                Ok(reply_value(String::new(), &reply, started))
+            })
+        })
+        .async_function("recents", |_| {
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let r = executor
+                    .spawn(async move { Client::connect().and_then(|mut c| c.recents()) })
+                    .await
+                    .map_err(|e| HostError::new(format!("{e:#}")))?;
                 Ok(HostObject::new()
-                    .field("query", query)
-                    .field("results", HostValue::Array(hits.iter().map(hit_value).collect()))
-                    .field("tookMs", started.elapsed().as_secs_f64() * 1000.0)
+                    .field(
+                        "searches",
+                        HostValue::Array(
+                            r.searches
+                                .iter()
+                                .map(|(q, at)| {
+                                    HostObject::new()
+                                        .field("query", q.as_str())
+                                        .field("at", *at as f64)
+                                        .into()
+                                })
+                                .collect(),
+                        ),
+                    )
+                    .field(
+                        "opened",
+                        HostValue::Array(r.opened.iter().map(hit_value).collect()),
+                    )
+                    .field(
+                        "added",
+                        HostValue::Array(r.added.iter().map(hit_value).collect()),
+                    )
                     .into())
+            })
+        })
+        .async_function("passage", |arguments| {
+            let id = arguments
+                .get(0)
+                .and_then(|v| match v {
+                    HostValue::Number(n) => Some(*n as i64),
+                    _ => None,
+                })
+                .ok_or_else(|| HostError::new("passage(id)"))?;
+            let code = matches!(arguments.get(1), Some(HostValue::Bool(true)));
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let p = executor
+                    .spawn(async move { Client::connect().and_then(|mut c| c.context(id, code)) })
+                    .await
+                    .map_err(|e| HostError::new(format!("{e:#}")))?;
+                Ok(HostObject::new()
+                    .field("text", p.text)
+                    .field("before", p.before)
+                    .field("after", p.after)
+                    .into())
+            })
+        })
+        .async_function("lines", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            let from = number(arguments.get(1)).unwrap_or(1.0).max(1.0) as usize;
+            let to = number(arguments.get(2))
+                .unwrap_or(from as f64 + 40.0)
+                .max(from as f64) as usize;
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let lines = executor
+                    .spawn(async move { actions::lines(&path, from, to) })
+                    .await;
+                Ok(HostValue::Array(
+                    lines
+                        .into_iter()
+                        .map(|(n, text)| {
+                            HostObject::new()
+                                .field("n", n as f64)
+                                .field("text", text)
+                                .into()
+                        })
+                        .collect(),
+                ))
             })
         })
         .async_function("thumb", |arguments| {
             let path = PathBuf::from(arguments.string(0)?);
             let kind = kind_of(arguments.string(1)?)?;
-            let locator = arguments.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n), _ => None });
+            let locator = number(arguments.get(2));
+            let size = match arguments.get(3) {
+                Some(HostValue::Str(s)) if &**s == "large" => thumbs::Size::Large,
+                _ => thumbs::Size::Small,
+            };
             let executor = with_app(|cx| cx.background_executor().clone())?;
             Ok(async move {
-                let thumb = executor.spawn(async move { thumbs::get(&path, kind, locator) }).await;
-                Ok(thumb.map(|p| HostValue::from(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
+                let thumb = executor
+                    .spawn(async move { thumbs::get(&path, kind, locator, size) })
+                    .await;
+                Ok(thumb
+                    .map(|p| HostValue::from(p.to_string_lossy().into_owned()))
+                    .unwrap_or(HostValue::Null))
             })
+        })
+        .function("trash", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            actions::trash(&path).map_err(|e| HostError::new(format!("{e:#}")))?;
+            Ok(HostValue::from(true))
+        })
+        .function("copyText", |arguments| {
+            let text = arguments.string(0)?.to_owned();
+            actions::copy_text(&text).map_err(|e| HostError::new(format!("{e:#}")))?;
+            Ok(HostValue::from(true))
         })
         .function("open", move |arguments| {
             let path = PathBuf::from(arguments.string(0)?);
             let kind = kind_of(arguments.string(1)?)?;
-            let locator = arguments.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n), _ => None });
+            let locator = arguments.get(2).and_then(|v| match v {
+                HostValue::Number(n) => Some(*n),
+                _ => None,
+            });
             let locator = match (kind, locator) {
                 (FileKind::Pdf, Some(p)) => Some(Locator::Page(p as u32)),
                 (FileKind::Audio | FileKind::Video, Some(s)) => Some(Locator::Seconds(s)),
@@ -361,7 +772,12 @@ fn dig_module(shared: Shared) -> HostModule {
                 _ => None,
             };
             let words = for_open.lock().unwrap().query_words.clone();
-            actions::open(&path, kind, locator, &words).map_err(|e| HostError::new(format!("{e:#}")))?;
+            actions::open(&path, kind, locator, &words)
+                .map_err(|e| HostError::new(format!("{e:#}")))?;
+            tell_daemon(Request::Opened {
+                path: path.clone(),
+                query: None,
+            });
             hide_window();
             Ok(HostValue::from(true))
         })
@@ -385,10 +801,10 @@ fn dig_module(shared: Shared) -> HostModule {
 /// Closes the special workspace if it is open. Off a thread: Hyprland answers in a few ms, but never block a frame.
 fn hide_window() {
     std::thread::spawn(|| {
-        if hypr::is_shown().unwrap_or(false) {
-            if let Err(error) = hypr::toggle() {
-                tracing::warn!("hide: {error:#}");
-            }
+        if hypr::is_shown().unwrap_or(false)
+            && let Err(error) = hypr::toggle()
+        {
+            tracing::warn!("hide: {error:#}");
         }
     });
 }
@@ -399,16 +815,44 @@ fn ui_root(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(dir) = explicit {
         return dir;
     }
-    for candidate in [dig_core::paths::data_dir().join("ui"), PathBuf::from("/usr/share/dig/ui")] {
+    for candidate in [
+        dig_core::paths::data_dir().join("ui"),
+        PathBuf::from("/usr/share/dig/ui"),
+    ] {
         if candidate.join("main.js").exists() {
             return candidate;
         }
     }
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui").canonicalize().unwrap_or_else(|_| PathBuf::from("ui"))
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../ui")
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from("ui"))
 }
 
-/// Follows the daemon's status stream; reconnects with a backoff while it is down.
+/// Follows the daemon's status stream. While it is down, waits for its socket to appear (inotify on the runtime
+/// directory) rather than retrying on a timer.
 fn follow_daemon(tx: async_channel::Sender<Note>) {
+    use notify::Watcher;
+    let socket = dig_client::socket_path();
+    let (appeared_tx, appeared) = std::sync::mpsc::channel::<()>();
+    let name = socket.file_name().map(|n| n.to_owned());
+    let watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && matches!(event.kind, notify::EventKind::Create(_))
+            && event.paths.iter().any(|p| p.file_name() == name.as_deref())
+        {
+            let _ = appeared_tx.send(());
+        }
+    });
+    // Watched before the first attempt, so a socket made in between is not missed. Without a watcher, fall back to
+    // a slow retry.
+    let watching = match (watcher, socket.parent()) {
+        (Ok(mut w), Some(dir)) => w
+            .watch(dir, notify::RecursiveMode::NonRecursive)
+            .is_ok()
+            .then_some(w),
+        _ => None,
+    };
     loop {
         match Client::connect() {
             Ok(client) => {
@@ -416,7 +860,7 @@ fn follow_daemon(tx: async_channel::Sender<Note>) {
                 let tx2 = tx.clone();
                 let _ = client.subscribe(|event| {
                     if let dig_client::Event::Status(status) = event {
-                        return tx2.send_blocking(Note::Status(status)).is_ok();
+                        return tx2.send_blocking(Note::Status(Box::new(status))).is_ok();
                     }
                     true
                 });
@@ -426,7 +870,16 @@ fn follow_daemon(tx: async_channel::Sender<Note>) {
                 let _ = tx.send_blocking(Note::Daemon(false));
             }
         }
-        std::thread::sleep(Duration::from_secs(5));
+        if watching.is_some() {
+            while appeared.try_recv().is_ok() {}
+            if !socket.exists() {
+                let _ = appeared.recv();
+            }
+            // The socket is bound before the daemon listens on it; a moment later it answers.
+            std::thread::sleep(Duration::from_millis(200));
+        } else {
+            std::thread::sleep(Duration::from_secs(30));
+        }
     }
 }
 
@@ -459,7 +912,13 @@ fn main() {
     }
     let ui = ui_root(ui);
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("dig_app=info,gpui_shell=info,gpui_kit::shell::script=info")))
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(
+                    "dig_app=info,gpui_shell=info,gpui_kit::shell::script=info",
+                )
+            }),
+        )
         .with_writer(std::io::stderr)
         .init();
 
@@ -482,7 +941,10 @@ fn main() {
     let _ = NOTES.set(tx.clone());
     {
         let tx = tx.clone();
-        std::thread::Builder::new().name("dig-daemon".into()).spawn(move || follow_daemon(tx)).expect("thread");
+        std::thread::Builder::new()
+            .name("dig-daemon".into())
+            .spawn(move || follow_daemon(tx))
+            .expect("thread");
     }
     {
         let tx = tx.clone();
@@ -518,108 +980,132 @@ fn main() {
     let _ = std::fs::create_dir_all(&thumbs_dir);
     let thumbs_dir = thumbs_dir.canonicalize().unwrap_or(thumbs_dir);
 
-    gpui_kit::application().with_assets(DigAssets { app: AppAssets::new(ui.clone()), thumbs: thumbs_dir.clone() }).run(move |cx| {
-        gpui_shell::init_with_components(cx, &components);
-        if dev {
-            gpui_shell::set_development_mode(true);
-        }
-        match theme::Palette::load() {
-            Ok(palette) => palette.apply(&font, cx),
-            Err(error) => tracing::warn!("no Omarchy theme ({error:#}): using the default palette"),
-        }
-        // The scripts may read their own directory (icons) and the thumbnail cache, and nothing else.
-        gpui_shell::set_capabilities(Capabilities::new().read_roots([ui.clone(), thumbs_dir.clone()]));
-        gpui_shell::export_module(dig_module(shared.clone())).expect("the `dig` module matches its declarations");
-        gpui_shell::on_exit_request(|_, _, cx| cx.quit());
-
-        let runtime = match ShellRuntime::new_with_components(cx, components) {
-            Ok(runtime) => runtime,
-            Err(error) => {
-                eprintln!("dig-app: failed to start the script runtime: {error}");
-                std::process::exit(1);
+    gpui_kit::application()
+        .with_assets(DigAssets {
+            app: AppAssets::new(ui.clone()),
+            thumbs: thumbs_dir.clone(),
+        })
+        .run(move |cx| {
+            gpui_shell::init_with_components(cx, &components);
+            if dev {
+                gpui_shell::set_development_mode(true);
             }
-        };
-
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(880.), px(600.)), cx))),
-            titlebar: Some(TitlebarOptions { title: Some("Dig".into()), ..Default::default() }),
-            app_id: Some(hypr::APP_ID.into()),
-            ..Default::default()
-        };
-        let app_root = ui.clone();
-        let runtime_for_window = runtime.clone();
-        let root_cell: Arc<Mutex<Option<gpui_kit::Entity<gpui_shell::ShellRoot>>>> = Arc::new(Mutex::new(None));
-        let root_sink = root_cell.clone();
-        let window = cx
-            .open_window(options, move |window, cx| {
-                let root = runtime_for_window.load(&app_root, window, cx);
-                if dev {
-                    match runtime_for_window.watch(&root, window, cx) {
-                        Ok(watch) => watch.forget(),
-                        Err(error) => tracing::warn!("not watching {}: {error}", app_root.display()),
-                    }
+            match theme::Palette::load() {
+                Ok(palette) => palette.apply(&font, cx),
+                Err(error) => {
+                    tracing::warn!("no Omarchy theme ({error:#}): using the default palette")
                 }
-                *root_sink.lock().unwrap() = Some(root.clone());
-                root
-            })
-            .expect("failed to open the Dig window");
-
-        // Notes from the threads land on the main thread here: the script is told to re-describe itself.
-        let shared_notes = shared.clone();
-        let font = font.clone();
-        cx.spawn(async move |cx| {
-            while let Ok(note) = rx.recv().await {
-                let _ = cx.update(|cx| {
-                    let mut refresh = true;
-                    match note {
-                        Note::Status(status) => shared_notes.lock().unwrap().status = Some(status),
-                        Note::Daemon(up) => shared_notes.lock().unwrap().daemon = up,
-                        Note::Shown => {
-                            {
-                                let mut s = shared_notes.lock().unwrap();
-                                s.visible = true;
-                                s.shown += 1;
-                            }
-                            tell_daemon(Request::Warm);
-                            let _ = window.update(cx, |_, window, _| window.activate_window());
-                            std::thread::spawn(|| {
-                                if let Err(error) = hypr::focus_window() {
-                                    tracing::warn!("focus: {error:#}");
-                                }
-                            });
-                        }
-                        Note::Hidden => {
-                            shared_notes.lock().unwrap().visible = false;
-                            tell_daemon(Request::Idle);
-                            refresh = false;
-                        }
-                        Note::Refresh => {}
-                        Note::Theme => match theme::Palette::load() {
-                            Ok(palette) => {
-                                tracing::info!("theme changed: retinting");
-                                palette.apply(&font, cx);
-                            }
-                            Err(error) => tracing::warn!("theme: {error:#}"),
-                        },
-                    }
-                    if refresh {
-                        if let Some(root) = root_cell.lock().unwrap().clone() {
-                            if let Err(error) = runtime.refresh(&root, cx) {
-                                tracing::warn!("refresh: {error}");
-                            }
-                        }
-                    }
-                });
             }
-        })
-        .detach();
+            // The scripts may read their own directory (icons) and the thumbnail cache, and nothing else.
+            gpui_shell::set_capabilities(
+                Capabilities::new().read_roots([ui.clone(), thumbs_dir.clone()]),
+            );
+            gpui_shell::export_module(dig_module(shared.clone()))
+                .expect("the `dig` module matches its declarations");
+            gpui_shell::on_exit_request(|_, _, cx| cx.quit());
 
-        cx.spawn(async move |cx| {
-            cx.update(|cx| {
-                cx.activate(true);
-                let _ = window.update(cx, |_, window, _| window.activate_window());
-            });
-        })
-        .detach();
-    });
+            let runtime = match ShellRuntime::new_with_components(cx, components) {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    eprintln!("dig-app: failed to start the script runtime: {error}");
+                    std::process::exit(1);
+                }
+            };
+
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
+                    None,
+                    size(px(1120.), px(700.)),
+                    cx,
+                ))),
+                titlebar: Some(TitlebarOptions {
+                    title: Some("Dig".into()),
+                    ..Default::default()
+                }),
+                app_id: Some(hypr::APP_ID.into()),
+                ..Default::default()
+            };
+            let app_root = ui.clone();
+            let runtime_for_window = runtime.clone();
+            let root_cell: Arc<Mutex<Option<gpui_kit::Entity<gpui_shell::ShellRoot>>>> =
+                Arc::new(Mutex::new(None));
+            let root_sink = root_cell.clone();
+            let window = cx
+                .open_window(options, move |window, cx| {
+                    let root = runtime_for_window.load(&app_root, window, cx);
+                    if dev {
+                        match runtime_for_window.watch(&root, window, cx) {
+                            Ok(watch) => watch.forget(),
+                            Err(error) => {
+                                tracing::warn!("not watching {}: {error}", app_root.display())
+                            }
+                        }
+                    }
+                    *root_sink.lock().unwrap() = Some(root.clone());
+                    root
+                })
+                .expect("failed to open the Dig window");
+
+            // Notes from the threads land on the main thread here: the script is told to re-describe itself.
+            let shared_notes = shared.clone();
+            let font = font.clone();
+            cx.spawn(async move |cx| {
+                while let Ok(note) = rx.recv().await {
+                    cx.update(|cx| {
+                        let mut refresh = true;
+                        match note {
+                            Note::Status(status) => {
+                                shared_notes.lock().unwrap().status = Some(*status)
+                            }
+                            Note::Daemon(up) => shared_notes.lock().unwrap().daemon = up,
+                            Note::Shown => {
+                                {
+                                    let mut s = shared_notes.lock().unwrap();
+                                    s.visible = true;
+                                    s.shown += 1;
+                                }
+                                tell_daemon(Request::Warm);
+                                let _ = window.update(cx, |_, window, _| window.activate_window());
+                                std::thread::spawn(|| {
+                                    if let Err(error) = hypr::fit_window() {
+                                        tracing::warn!("fit: {error:#}");
+                                    }
+                                    if let Err(error) = hypr::focus_window() {
+                                        tracing::warn!("focus: {error:#}");
+                                    }
+                                });
+                            }
+                            Note::Hidden => {
+                                shared_notes.lock().unwrap().visible = false;
+                                tell_daemon(Request::Idle);
+                                refresh = false;
+                            }
+                            Note::Refresh => {}
+                            Note::Theme => match theme::Palette::load() {
+                                Ok(palette) => {
+                                    tracing::info!("theme changed: retinting");
+                                    palette.apply(&font, cx);
+                                }
+                                Err(error) => tracing::warn!("theme: {error:#}"),
+                            },
+                        }
+                        if refresh
+                            && let Some(root) = root_cell.lock().unwrap().clone()
+                            && let Err(error) = runtime.refresh(&root, cx)
+                        {
+                            tracing::warn!("refresh: {error}");
+                        }
+                    });
+                }
+            })
+            .detach();
+
+            cx.spawn(async move |cx| {
+                cx.update(|cx| {
+                    cx.activate(true);
+                    let _ = window.update(cx, |_, window, _| window.activate_window());
+                });
+            })
+            .detach();
+        });
 }

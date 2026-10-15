@@ -79,11 +79,14 @@ pub fn walk(root: &Root, mut each: impl FnMut(Candidate) -> bool) -> Skipped {
                 ignored_in_filter.fetch_add(1, Ordering::Relaxed);
                 return false;
             }
-            if let Ok(dir) = std::fs::read_dir(entry.path()) {
-                if dir.take(rules::MAX_DIR_ENTRIES + 1).count() > rules::MAX_DIR_ENTRIES {
-                    huge_in_filter.lock().unwrap().push(entry.path().to_path_buf());
-                    return false;
-                }
+            if let Ok(dir) = std::fs::read_dir(entry.path())
+                && dir.take(rules::MAX_DIR_ENTRIES + 1).count() > rules::MAX_DIR_ENTRIES
+            {
+                huge_in_filter
+                    .lock()
+                    .unwrap()
+                    .push(entry.path().to_path_buf());
+                return false;
             }
             true
         })
@@ -97,7 +100,8 @@ pub fn walk(root: &Root, mut each: impl FnMut(Candidate) -> bool) -> Skipped {
         }
         if is_dir {
             let parent_code = stack.last().map(|(_, c)| *c).unwrap_or(false);
-            let code = parent_code || (!root_is_code && depth > 0 && rules::is_code_project(entry.path()));
+            let code =
+                parent_code || (!root_is_code && depth > 0 && rules::is_code_project(entry.path()));
             if code && !parent_code {
                 code_dirs += 1;
             }
@@ -115,9 +119,16 @@ pub fn walk(root: &Root, mut each: impl FnMut(Candidate) -> bool) -> Skipped {
         }
         let kind = if root_is_code {
             // A code root: every source file (and the repo's docs and config) as code, nothing else.
-            if dig_extract::code::is_code(path) { FileKind::Code } else { skipped.by_type += 1; continue }
+            if dig_extract::code::is_code(path) {
+                FileKind::Code
+            } else {
+                skipped.by_type += 1;
+                continue;
+            }
         } else {
-            let Some(kind) = dig_extract::classify::classify(path).filter(|k| dig_extract::supported(*k)) else {
+            let Some(kind) =
+                dig_extract::classify::classify(path).filter(|k| dig_extract::supported(*k))
+            else {
                 skipped.by_type += 1;
                 continue;
             };
@@ -132,8 +143,18 @@ pub fn walk(root: &Root, mut each: impl FnMut(Candidate) -> bool) -> Skipped {
             skipped.by_size += 1;
             continue;
         }
-        let mtime = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs() as i64).unwrap_or(0);
-        if !each(Candidate { path: path.to_path_buf(), kind, mtime, size: meta.len() }) {
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        if !each(Candidate {
+            path: path.to_path_buf(),
+            kind,
+            mtime,
+            size: meta.len(),
+        }) {
             break;
         }
     }
@@ -172,10 +193,25 @@ mod tests {
         std::fs::write(p.join(".gitignore"), "ignored.md\n").unwrap();
         std::fs::write(p.join("ignored.md"), "no").unwrap();
 
-        let (files, skipped) = crawl(&Root { path: p.to_path_buf(), code: false });
-        let mut names: Vec<String> = files.iter().map(|c| c.path.strip_prefix(p).unwrap().to_string_lossy().into_owned()).collect();
+        let (files, skipped) = crawl(&Root {
+            path: p.to_path_buf(),
+            code: false,
+        });
+        let mut names: Vec<String> = files
+            .iter()
+            .map(|c| {
+                c.path
+                    .strip_prefix(p)
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
         names.sort();
-        assert_eq!(names, vec!["notes.md", "photo.jpg", "proj/docs/Screenshot-1.png"]);
+        assert_eq!(
+            names,
+            vec!["notes.md", "photo.jpg", "proj/docs/Screenshot-1.png"]
+        );
         assert_eq!(skipped.secrets, 1);
         assert_eq!(skipped.by_size, 1);
         assert_eq!(skipped.code_project_dirs, 1);

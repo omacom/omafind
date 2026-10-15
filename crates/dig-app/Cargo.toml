@@ -10,6 +10,7 @@ dig-core = { path = "../dig-core" }
 dig-client = { path = "../dig-client" }
 dig-setup = { path = "../dig-setup" }
 dig-index = { path = "../dig-index" }
+dig-extract = { path = "../dig-extract" }
 gpui-kit.workspace = true
 gpui-shell.workspace = true
 anyhow.workspace = true
