@@ -25,9 +25,15 @@ pub fn config_dir() -> PathBuf {
     xdg("XDG_CONFIG_HOME", ".config").join("dig")
 }
 
-/// `$XDG_RUNTIME_DIR` (or /tmp): the daemon and app sockets.
+/// `$XDG_RUNTIME_DIR`, else `/run/user/<uid>` when it exists (a shell without the variable, a service), else /tmp:
+/// where the daemon's socket is.
 pub fn runtime_dir() -> PathBuf {
-    std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"))
+    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(dir);
+    }
+    let uid = std::fs::metadata(home()).map(|m| std::os::unix::fs::MetadataExt::uid(&m)).unwrap_or(0);
+    let run = PathBuf::from(format!("/run/user/{uid}"));
+    if run.is_dir() { run } else { PathBuf::from("/tmp") }
 }
 
 /// The main index.

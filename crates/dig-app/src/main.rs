@@ -582,6 +582,11 @@ fn main() {
                             }
                             tell_daemon(Request::Warm);
                             let _ = window.update(cx, |_, window, _| window.activate_window());
+                            std::thread::spawn(|| {
+                                if let Err(error) = hypr::focus_window() {
+                                    tracing::warn!("focus: {error:#}");
+                                }
+                            });
                         }
                         Note::Hidden => {
                             shared_notes.lock().unwrap().visible = false;

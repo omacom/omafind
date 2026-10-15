@@ -161,6 +161,11 @@ fn toggle() -> Result<()> {
     }
     let out = hypr(&["dispatch", "hl.dsp.workspace.toggle_special(\"dig\")"])?;
     anyhow::ensure!(out.trim() == "ok", "hyprctl: {}", out.trim());
+    // Shown: make sure the keyboard is on it (a toggle from another window doesn't always move focus).
+    let shown = hypr(&["-j", "monitors"]).map(|j| j.contains("\"name\": \"special:dig\"")).unwrap_or(false);
+    if shown {
+        let _ = hypr(&["dispatch", "hl.dsp.focus({ window = \"class:dig\" })"]);
+    }
     Ok(())
 }
 

@@ -48,6 +48,12 @@ pub fn toggle() -> Result<()> {
     dispatch(&format!("hl.dsp.workspace.toggle_special(\"{WORKSPACE}\")"))
 }
 
+/// Gives the window keyboard focus. A toggle from the keybinding focuses it anyway; a window shown while another
+/// had the keyboard (the first show after a launch) does not always.
+pub fn focus_window() -> Result<()> {
+    dispatch(&format!("hl.dsp.focus({{ window = \"class:{APP_ID}\" }})"))
+}
+
 /// Whether the dig special workspace is open on any monitor.
 pub fn is_shown() -> Result<bool> {
     let json = command("j/monitors")?;
