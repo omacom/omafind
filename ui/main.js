@@ -17,8 +17,10 @@ import { Setup } from "./setup.js";
 // Names and keywords answer in a few ms: shown almost at once. The model's answer follows when typing pauses.
 const QUICK_MS = 30;
 const FULL_MS = 110;
-const ROW = 68;
+const ROW = 90;
+// Result thumbnails are page-shaped, like the design's: a PDF page, a document card, a frame.
 const THUMB = 44;
+const THUMB_H = 56;
 const TILE = 140;
 const TILE_GAP = 8;
 
@@ -473,9 +475,38 @@ export default class Omafind extends View {
   picture(row, w, h, cx) {
     const c = cx.theme().colors;
     const p = this.thumbs.get(thumbKey(row));
-    const cell = div().w(w).h(h).flex_none().rounded(cx.theme().radius.sm).overflow_hidden().bg(c.muted).flex().items_center().justify_center();
-    if (p) return cell.child(image(p).size_full());
-    return cell.text_size(Math.min(w, h) * 0.4).text_color(c.muted_foreground).child(glyph(row.kind));
+    const cell = div().w(w).h(h).flex_none().rounded(3).overflow_hidden().bg(c.muted).flex().items_center().justify_center().relative();
+    // A moment in a recording or video sits on the picture, as on a video thumbnail.
+    const badge = (row.kind === "video" || row.kind === "audio") && row.locatorLabel
+      ? div().absolute().left(3).bottom(3).px(3).rounded(2).bg(alpha(c.background, 0.75)).text_size(9).text_color(c.foreground).child(row.locatorLabel)
+      : div();
+    if (p) return cell.child(image(p).size_full()).child(badge);
+    // Documents and code without a picture show their type, the way a file card would.
+    if (row.kind === "doc" || row.kind === "code") {
+      const ext = row.name.includes(".") ? row.name.split(".").pop().toUpperCase().slice(0, 4) : "TXT";
+      return cell.bg(c.surface).border(1).border_color(c.border).text_size(10).text_color(c.muted_foreground).child(ext);
+    }
+    return cell.text_size(Math.min(w, h) * 0.4).text_color(c.muted_foreground).child(glyph(row.kind)).child(badge);
+  }
+
+  /** The matched passage under a result's name: up to two lines, the query's words tinted like a highlighter. */
+  snippet(text, words, color, cx) {
+    const c = cx.theme().colors;
+    const pieces = marks(text, words).flatMap((m) => m.text.split(/(?<= )/).filter(Boolean).map((part) => ({ part, hit: m.hit })));
+    return h_flex()
+      .w_full()
+      .h(38)
+      .overflow_hidden()
+      .flex_wrap()
+      .content_start()
+      .text_size(12)
+      .children(
+        pieces.map(({ part, hit }) =>
+          hit
+            ? div().flex_none().rounded(2).bg(alpha(c.primary, 0.2)).text_color(c.primary).child(part)
+            : div().flex_none().text_color(color).child(part),
+        ),
+      );
   }
 
   row(row, index, cx) {
@@ -487,7 +518,7 @@ export default class Omafind extends View {
     return h_flex()
       .id(`row-${row.id}`)
       .w_full()
-      .h(ROW - 4)
+      .h(ROW - 2)
       .px(10)
       .gap(12)
       .items_center()
@@ -502,22 +533,22 @@ export default class Omafind extends View {
           cx.notify();
         }
       })
-      .child(this.picture(row, THUMB, THUMB, cx))
+      .child(this.picture(row, THUMB, THUMB_H, cx))
       .child(
         v_flex()
           .flex_1()
           .min_w_0()
-          .gap(3)
+          .gap(4)
           .child(
             h_flex()
               .gap(8)
               .items_center()
               .min_w_0()
-              .child(div().text_size(13).font_medium().text_color(selected ? c.accent_foreground : c.foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name))
+              .child(div().text_size(13).when(selected, (d) => d.font_semibold()).when(!selected, (d) => d.font_medium()).text_color(selected ? c.accent_foreground : c.foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name))
               .child(this.pill(tag(row), cx, selected))
               .child(row.duplicates.length ? this.pill(`+${row.duplicates.length} similar`, cx, false) : div()),
           )
-          .child(caption ? this.marked(caption, words, c.muted_foreground, c.primary, 12) : div().h(15))
+          .child(row.snippet !== "" ? this.snippet(caption, words, selected ? c.foreground : c.muted_foreground, cx) : caption ? div().text_size(12).text_color(c.muted_foreground).child(caption) : div())
           .child(div().text_size(11).text_color(c.muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(meta)),
       );
   }
