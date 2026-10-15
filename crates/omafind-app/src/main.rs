@@ -38,6 +38,8 @@ export interface Result {
   /** Page, seconds, line or character offset; null for a whole-file match. */
   locator: number | null;
   /** The locator for people: "p. 12", "03:41", "L88", or "". */
+  /** Where the chunk ends: a code stretch's last line, a passage's end offset. */
+  locatorEnd: number | null;
   locatorLabel: string;
   snippet: string;
   score: number;
@@ -98,6 +100,11 @@ export function recents(): Promise<Recents>;
 export function passage(id: number, code?: boolean): Promise<Passage>;
 /** Lines `from`..=`to` of a text file (code previews). */
 export function lines(path: string, from: number, to: number): Promise<Line[]>;
+/** A plain text file's lines around characters `start`..`end` (a passage), and the passage's first and last line;
+ *  null for documents whose text isn't the file's own (office, HTML). */
+export function section(path: string, start: number, end: number): Promise<{ lines: Line[]; first: number; last: number } | null>;
+/** Theme colors for code beyond the gpui-base roles, or null before a theme loads. */
+export function syntax(): { number: string; string: string } | null;
 /** The picture for a result: "small" (rows, grid) or "large" (preview); null when the kind has none. */
 export function thumb(path: string, kind: string, locator: number | null, size?: "small" | "large"): Promise<string | null>;
 /** Moves the file to the trash. */
@@ -105,6 +112,7 @@ export function trash(path: string): boolean;
 /** Puts text on the clipboard. */
 export function copyText(text: string): boolean;
 export function status(): Status;
+/** `locator`: a PDF's page, a moment in seconds, a line of code or of a plain text document. */
 export function open(path: string, kind: string, locator: number | null): boolean;
 export function reveal(path: string): boolean;
 export function copy(path: string): boolean;
@@ -213,6 +221,12 @@ fn hit_value(hit: &omafind_core::Hit) -> HostValue {
             "locator",
             hit.locator
                 .map(|l| HostValue::Number(l.value()))
+                .unwrap_or(HostValue::Null),
+        )
+        .field(
+            "locatorEnd",
+            hit.locator_end
+                .map(HostValue::Number)
                 .unwrap_or(HostValue::Null),
         )
         .field("locatorLabel", hit.locator_label.as_str())
@@ -572,6 +586,49 @@ fn omafind_module(shared: Shared) -> HostModule {
             })
         })
         .declarations(OMAFIND_TYPES)
+        .function("syntax", |_| {
+            Ok(match theme::SYNTAX.lock().unwrap().clone() {
+                Some((number, string)) => HostObject::new()
+                    .field("number", number)
+                    .field("string", string)
+                    .into(),
+                None => HostValue::Null,
+            })
+        })
+        .async_function("section", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            let start = number(arguments.get(1)).unwrap_or(0.0).max(0.0) as usize;
+            let end = number(arguments.get(2))
+                .unwrap_or(start as f64)
+                .max(start as f64) as usize;
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let found = executor
+                    .spawn(async move { actions::text_section(&path, start, end, 4, 80) })
+                    .await;
+                Ok(match found {
+                    Some((lines, first, last)) => HostObject::new()
+                        .field(
+                            "lines",
+                            HostValue::Array(
+                                lines
+                                    .into_iter()
+                                    .map(|(n, text)| {
+                                        HostObject::new()
+                                            .field("n", n as f64)
+                                            .field("text", text)
+                                            .into()
+                                    })
+                                    .collect(),
+                            ),
+                        )
+                        .field("first", first as f64)
+                        .field("last", last as f64)
+                        .into(),
+                    None => HostValue::Null,
+                })
+            })
+        })
         .function("status", move |_| {
             Ok(status_value(&for_status.lock().unwrap()))
         })
@@ -782,7 +839,8 @@ fn omafind_module(shared: Shared) -> HostModule {
             let locator = match (kind, locator) {
                 (FileKind::Pdf, Some(p)) => Some(Locator::Page(p as u32)),
                 (FileKind::Audio | FileKind::Video, Some(s)) => Some(Locator::Seconds(s)),
-                (FileKind::Code, Some(l)) => Some(Locator::Line(l as u32)),
+                // A plain text file's line: the script passes one only when it found where the words are.
+                (FileKind::Code | FileKind::Doc, Some(l)) => Some(Locator::Line(l as u32)),
                 _ => None,
             };
             let words = for_open.lock().unwrap().query_words.clone();

@@ -417,6 +417,7 @@ fn hit(row: &ChunkRow, f: &Fused, words: &[String], by_vector: bool) -> Hit {
         kind: row.file_kind,
         chunk_kind: row.kind,
         locator,
+        locator_end: row.locator_end,
         locator_label: locator.map(|l| l.label()).unwrap_or_default(),
         snippet,
         score: f.score,

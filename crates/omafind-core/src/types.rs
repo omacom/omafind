@@ -219,6 +219,9 @@ pub struct Hit {
     pub kind: FileKind,
     pub chunk_kind: ChunkKind,
     pub locator: Option<Locator>,
+    /// Where the chunk ends, in the locator's unit: the last line of a code stretch, the character after a passage.
+    #[serde(default)]
+    pub locator_end: Option<f64>,
     pub locator_label: String,
     /// The matched passage (or OCR text) around the query words, or empty for an image.
     pub snippet: String,

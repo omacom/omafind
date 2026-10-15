@@ -8,7 +8,7 @@
 import { View, div, image } from "gpui-kit";
 import { homedir } from "os";
 import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_list, TextView } from "gpui-base";
-import { search, similar, recents, passage, lines, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
+import { search, similar, recents, passage, lines, section, syntax, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
 import { FILTERS, glyph, count, filterCount, tag, when, bytes, duration, marks, alpha, escapeMarkdown } from "./kinds.js";
 import { Setup } from "./setup.js";
 /** @import { AsyncContext, Context } from "gpui-kit" */
@@ -269,14 +269,27 @@ export default class Omafind extends View {
     if (!row) return;
     const key = thumbKey(row);
     if (this.previews.has(key)) return;
-    const entry = { large: undefined, passage: undefined, lines: undefined };
+    const entry = { large: undefined, passage: undefined, lines: undefined, first: 0, last: 0 };
     this.previews.set(key, entry);
     cx.spawn(async (cx) => {
       try {
         if (hasThumb(row.kind)) entry.large = await thumb(row.path, row.kind, row.locator, "large");
         if (row.kind === "code") {
-          const at = row.locator ?? 1;
-          entry.lines = await lines(row.path, Math.max(1, at - 4), at + 40);
+          entry.first = row.locator ?? 1;
+          entry.last = Math.min(row.locatorEnd ?? entry.first, entry.first + 79);
+          entry.lines = await lines(row.path, Math.max(1, entry.first - 4), entry.last + 4);
+          entry.best = bestLine(entry, row.matchedWords);
+          // Open the editor where the words are, not where the stretch starts.
+          row.openAt = entry.best;
+        } else if (row.kind === "doc" && row.locator != null && row.locatorEnd != null) {
+          // A plain text file shows as lines, like code; an office document's text isn't the file's, so a passage.
+          const found = await section(row.path, row.locator, row.locatorEnd);
+          if (found) {
+            Object.assign(entry, found);
+            entry.best = bestLine(entry, row.matchedWords);
+            row.openAt = entry.best;
+          }
+          else entry.passage = await passage(row.id, false);
         } else if (row.kind === "doc" || row.kind === "pdf" || row.kind === "screenshot") {
           entry.passage = await passage(row.id, false);
         }
@@ -314,18 +327,15 @@ export default class Omafind extends View {
 
   openSelected(cx) {
     const row = this.results[this.selected];
-    if (row) open(row.path, row.kind, row.locator);
+    if (row) open(row.path, row.kind, openLocator(row));
     cx.notify();
   }
 
   /** Actions for the selected result, in the order the menu shows them. */
   actionsFor(row) {
-    const primary =
-      row.kind === "pdf" && row.locator ? `Open at page ${row.locator}` :
-      (row.kind === "video" || row.kind === "audio") && row.locator != null ? `Play from ${row.locatorLabel}` :
-      row.kind === "code" && row.locator ? `Open at line ${row.locator}` : "Open";
+    const primary = primaryLabel(row);
     const items = [
-      { label: primary, keys: "⏎", run: () => open(row.path, row.kind, row.locator) },
+      { label: primary, keys: "⏎", run: () => open(row.path, row.kind, openLocator(row)) },
       { label: "More like this", keys: "⌃S", run: (cx) => this.moreLikeThis(cx), stay: true },
       { label: "Show in Files", keys: "⌃⏎", run: () => reveal(row.path) },
       { label: "Copy file", keys: "⌃C", run: () => copy(row.path) },
@@ -746,25 +756,8 @@ export default class Omafind extends View {
     const words = row.matchedWords;
     const info = [row.folder, row.locatorLabel && row.kind === "pdf" ? `page ${row.locator}` : "", when(row.mtime), bytes(row.size)].filter(Boolean).join(" · ");
     let body;
-    if (row.kind === "code" && data.lines) {
-      body = v_flex()
-        .flex_1()
-        .min_h_0()
-        .overflow_hidden()
-        .rounded(cx.theme().radius.md)
-        .bg(c.surface)
-        .py(8)
-        .children(
-          data.lines.map((l) => {
-            const inMatch = row.locator && l.n >= row.locator && l.n < row.locator + 30;
-            return h_flex()
-              .px(12)
-              .bg(inMatch ? alpha(c.primary, l.n === row.locator ? 0.16 : 0.07) : c.surface)
-              .text_size(12)
-              .child(div().w(40).flex_none().text_color(c.muted_foreground).child(String(l.n)))
-              .child(this.marked(l.text || " ", words, c.foreground, c.primary, 12));
-          }),
-        );
+    if (data.lines) {
+      body = this.linesView(row, data, cx);
     } else if (picture && row.kind !== "doc") {
       const pane = div().flex_1().min_h_0().rounded(cx.theme().radius.md).overflow_hidden().bg(c.surface).flex().items_center().justify_center().child(image(picture).size_full());
       body = v_flex().flex_1().min_h_0().gap(10).child(pane);
@@ -796,6 +789,51 @@ export default class Omafind extends View {
           .child(div().text_size(11).text_color(c.muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(info)),
       )
       .child(body);
+  }
+
+  /** Numbered lines of code or plain text, the matched stretch tinted and its likeliest line (the one holding the
+   *  most query words) stronger. Code is coloured by a small tokenizer; text wraps. */
+  linesView(row, data, cx) {
+    const c = cx.theme().colors;
+    const code = row.kind === "code";
+    const words = row.matchedWords;
+    const inside = (n) => n >= data.first && n <= data.last;
+    const best = data.best ?? data.first;
+    const lang = code ? language(row.path) : null;
+    const palette = syntax();
+    const colors = {
+      plain: c.foreground,
+      keyword: c.primary,
+      number: palette?.number ?? c.primary,
+      string: palette?.string ?? c.foreground,
+      comment: c.muted_foreground,
+    };
+    // The pane fits about 30 lines: start a little above the strongest line when it would fall below them.
+    const from = Math.max(data.lines[0]?.n ?? 1, best - 8);
+    return v_flex()
+      .flex_1()
+      .min_h_0()
+      .overflow_hidden()
+      .rounded(cx.theme().radius.md)
+      .bg(c.surface)
+      .py(8)
+      .children(
+        data.lines.filter((l) => l.n >= from || best - data.first < 22).map((l) => {
+          const strength = l.n === best ? 0.18 : inside(l.n) ? 0.1 : 0;
+          const gutter = l.n === best ? c.foreground : inside(l.n) ? c.muted_foreground : alpha(c.muted_foreground, 0.5);
+          const text = code
+            ? h_flex().min_w_0().overflow_hidden().whitespace_nowrap().children(tokens(l.text || " ", lang).map((t) => div().flex_none().text_color(colors[t.kind]).child(t.text)))
+            : h_flex().flex_1().min_w_0().flex_wrap().children(marks(l.text || " ", words).flatMap((m) => m.text.split(/(?<= )/).map((part) => div().flex_none().text_color(m.hit ? c.primary : c.foreground).child(part))));
+          return h_flex()
+            .items_start()
+            .px(14)
+            .py(code ? 1 : 2)
+            .bg(strength ? alpha(c.primary, strength) : c.surface)
+            .text_size(12)
+            .child(div().w(40).flex_none().text_color(gutter).child(String(l.n)))
+            .child(text);
+        }),
+      );
   }
 
   passageView(row, p, height, cx) {
@@ -1105,20 +1143,92 @@ export default class Omafind extends View {
   }
 }
 
-// What Enter does to this row, for the footer: a page, a moment or a line when the hit has one.
-function openVerb(row) {
-  if (!row) return "open";
-  if (row.kind === "pdf" && row.locator) return `open at page ${row.locator}`;
-  if ((row.kind === "video" || row.kind === "audio") && row.locator != null) return `play from ${row.locatorLabel}`;
-  if (row.kind === "code" && row.locator) return `open at line ${row.locator}`;
-  return "open";
+const KEYWORDS = new Set(("as async await break case catch class const continue crate def default defer del do dyn elif else " +
+  "enum except export extends false fi final finally fn for from func function go if impl import in interface " +
+  "let local loop match mod module mut new nil None not null or package pass pub raise return self Self static " +
+  "struct super switch then this throw trait true True False try type typeof undefined unsafe use var where while " +
+  "with yield").split(" "));
+const HASH_COMMENTS = new Set(["py", "sh", "bash", "zsh", "fish", "rb", "toml", "yaml", "yml", "pl", "r", "nix", "conf", "cfg", "ini", "dockerfile", "mk", "cmake"]);
+const DASH_COMMENTS = new Set(["lua", "sql", "hs", "elm"]);
+
+/** The line of the matched stretch holding the most query words (the first on a tie, the stretch's start if none). */
+function bestLine(data, words) {
+  let best = data.first;
+  let most = 0;
+  for (const l of data.lines) {
+    if (l.n < data.first || l.n > data.last) continue;
+    const lower = l.text.toLowerCase();
+    const count = words.filter((w) => lower.includes(w.toLowerCase())).length;
+    if (count > most) [best, most] = [l.n, count];
+  }
+  return best;
 }
 
-// The bar's main button: the same as Enter, short enough to sit beside the query.
+function language(path) {
+  const name = path.split("/").pop().toLowerCase();
+  return name.includes(".") ? name.split(".").pop() : name;
+}
+
+/** One line of code as coloured pieces: comments, strings, numbers, keywords, the rest plain. Line by line, so a
+ *  block comment or string that spans lines colours only where it starts; good enough for a preview. */
+function tokens(line, lang) {
+  const comment = HASH_COMMENTS.has(lang) ? "#" : DASH_COMMENTS.has(lang) ? "--" : "//";
+  const singleQuoted = lang !== "rs";
+  const out = [];
+  const push = (kind, text) => {
+    const last = out[out.length - 1];
+    if (last && last.kind === kind) last.text += text;
+    else out.push({ kind, text });
+  };
+  let i = 0;
+  while (i < line.length) {
+    const rest = line.slice(i);
+    if (rest.startsWith(comment) || rest.startsWith("/*")) {
+      push("comment", rest);
+      break;
+    }
+    const ch = line[i];
+    if (ch === '"' || ch === "`" || (ch === "'" && singleQuoted)) {
+      let j = i + 1;
+      while (j < line.length && line[j] !== ch) j += line[j] === "\\" ? 2 : 1;
+      push("string", line.slice(i, j + 1));
+      i = j + 1;
+      continue;
+    }
+    const word = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+    if (word) {
+      push(KEYWORDS.has(word[0]) ? "keyword" : "plain", word[0]);
+      i += word[0].length;
+      continue;
+    }
+    const num = /^\d[\d_]*(\.\d+)?/.exec(rest);
+    if (num) {
+      push("number", num[0]);
+      i += num[0].length;
+      continue;
+    }
+    push("plain", ch);
+    i += 1;
+  }
+  return out;
+}
+
+// Where to open: the line the preview found for code and plain text (a document's own locator is a character
+// offset, which no app takes), else the page or moment.
+function openLocator(row) {
+  if (row.openAt != null) return row.openAt;
+  return row.kind === "doc" ? null : row.locator;
+}
+
+// What Enter does to this row, for the footer.
+function openVerb(row) {
+  return row ? primaryLabel(row).toLowerCase() : "open";
+}
+
+// The bar's main button, what Enter does. Pages and lines go unsaid: opening at the match is simply what Open
+// does. A recording or video says where it starts playing, since a moment isn't visible otherwise.
 function primaryLabel(row) {
-  if (row.kind === "pdf" && row.locator) return `Open at p. ${row.locator}`;
   if ((row.kind === "video" || row.kind === "audio") && row.locator != null) return `Play from ${row.locatorLabel}`;
-  if (row.kind === "code" && row.locator) return `Open at line ${row.locator}`;
   return "Open";
 }
 

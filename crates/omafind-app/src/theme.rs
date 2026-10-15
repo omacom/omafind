@@ -20,7 +20,12 @@ pub struct Palette {
     pub selection: Hsla,
     pub muted: Hsla,
     pub red: Hsla,
+    pub yellow: Hsla,
+    pub green: Hsla,
 }
+
+/// Colors the scripts need beyond gpui-base's roles: numbers and strings in code previews, as `#rrggbb`.
+pub static SYNTAX: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
 
 pub fn state_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state/omarchy/current")
@@ -85,6 +90,8 @@ impl Palette {
             selection: get(&["selection"]).unwrap_or(mix(background, foreground, 0.08)),
             muted: get(&["muted", "color8"]).unwrap_or(mix(background, foreground, 0.2)),
             red: get(&["red", "color1"]).unwrap_or(accent),
+            yellow: get(&["yellow", "color3"]).unwrap_or(accent),
+            green: get(&["green", "color2"]).unwrap_or(foreground),
         })
     }
 
@@ -122,6 +129,7 @@ impl Palette {
         c.input = self.muted;
         c.ring = self.accent;
         c.selection = self.selection;
+        *SYNTAX.lock().unwrap() = Some((to_hex(self.yellow), to_hex(self.green)));
         let t = &mut theme.tokens.typography;
         t.sans = font.to_owned().into();
         t.mono = font.to_owned().into();
@@ -159,6 +167,12 @@ impl Palette {
             self.foreground
         }
     }
+}
+
+fn to_hex(color: Hsla) -> String {
+    let c: Rgba = color.into();
+    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
 }
 
 /// `a` towards `b` by `t`.
