@@ -7,9 +7,13 @@ license.workspace = true
 
 [dependencies]
 dig-core = { path = "../dig-core" }
+dig-client = { path = "../dig-client" }
 gpui-kit.workspace = true
 gpui-shell.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
+toml = "0.9"
+notify = "8"
+async-channel = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

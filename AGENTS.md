@@ -17,8 +17,11 @@ lingers 60 s after its queue empties, answers searches over `$XDG_RUNTIME_DIR/di
 loaded on demand (unloaded after 10 idle minutes, 2 min after the window hides), pauses in power-saver / on battery
 per config (UPower + power-profiles-daemon over D-Bus signals). Measured: a new photo is searchable 2–3 s after it
 lands; the daemon idles at 15 MB RSS without the encoder, ~300 MB with it. The power-saver pause is implemented but
-untested (polkit refuses `powerprofilesctl` from an agent shell). Notes with numbers: `docs/phase-0.md`. Next:
-Phase 5 (the window) per `PLAN.md`.
+untested (polkit refuses `powerprofilesctl` from an agent shell). Phase 5 (the window): `dig-app` is resident;
+Hyprland keeps its window in the `special:dig` workspace (packaging/hypr-window-rules.lua) and `dig toggle` flips
+that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
+subscribes to digd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Notes
+with numbers: `docs/phase-0.md`. Next: Phase 6 (setup, doctor, packaging) per `PLAN.md`.
 
 ## Layout
 
@@ -34,8 +37,11 @@ crates/dig-client    socket protocol (JSON lines: search, status, pause, resume,
 crates/digd          daemon: coordinator (daemon.rs), worker child (worker.rs), watcher, power, searcher, server
 crates/dig-cli       `dig index|search|status|pause|resume|watch` (through digd when it runs, else in-process)
 systemd/digd.service user unit: Nice=10, IOSchedulingClass=idle, CPUWeight=20, MemoryHigh=3G
-crates/dig-app       GPUI Shell host: window, `dig` host module; later theme bridge + app socket
-ui/                  QuickJS UI scripts (gpui-shell.json, main.js); gpui-kit.d.ts is generated, not committed
+crates/dig-app       GPUI Shell host: window (app id `dig`), `dig` host module (search/thumb/status/open/reveal/
+                     copy/hide), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs (colors.toml → tokens,
+                     watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/dig/thumbs), actions.rs
+ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
+packaging/           hypr-window-rules.lua, hypr-binding.lua (appended to the user's Hyprland config by `dig setup`)
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
 evals/               make-testbed.sh; evals/testbed/ holds local test media (ignored)
 ```
@@ -113,17 +119,32 @@ ranks its file first; a search is ~50 ms warm.
 - Short queries embed faster on CPU (~22 ms) than on this GPU (~35 ms); media is 7× faster on the GPU. Measure both
   at first run and pick the query-encoder device.
 
+## Hyprland 0.56 (Lua config) from Dig
+
+Dispatchers are Lua: `hl.dsp.workspace.toggle_special("dig")`, `hl.dsp.window.move({ workspace = "special:dig",
+follow = false, window = "class:dig" })`, `hl.dsp.window.float({ window = "class:dig", action = "on" })`; the old
+`togglespecialworkspace` spelling is gone (`focuswindow class:dig` still works). Over the IPC socket the command is
+`dispatch <lua>`. Events on `.socket2.sock`: `activespecial>>special:dig,eDP-1` when opened, `activespecial>>,eDP-1`
+when closed. Window rules in the user's `~/.config/hypr/windows.lua` use `o.window({ class = "^dig$" }, { … })`.
+
 ## GPUI Shell notes for the UI (Phase 5)
 
 - Host modules are call-only: `HostModule::new("dig").function(...)/.async_function(...)/.declarations(ts)`,
   `export_module` before `ShellRuntime::new_with_components`. Scripts `import { search } from "dig"`. Values are
   null/bool/number/string/array/object (`HostObject::new().field(..)`). No host → script push: use
   `runtime.refresh(&root, cx)` after host state changes, or a long-poll async function.
-- Nothing holds keyboard focus when the window opens; the root View calls `this.focus.focus()` in `init`, and Tab
-  (ShellRoot navigation) moves onto the `Input`. There is no script API to focus an `Input` directly at this revision.
+- Nothing holds keyboard focus when the window opens; the root View calls `this.focus.focus()` then
+  `window.focus_next()` (a tick later) to land on the `Input`. Done again on every show.
+- `image(path)` only serves the application directory; `dig-app` installs its own `AssetSource` that also serves
+  absolute paths under `~/.cache/dig/thumbs`. `uniform_list` ignores `track_scroll`; `v_virtual_list` (gpui-base)
+  with a fixed row height takes a `VirtualListScrollHandle` and `scroll_to_item`.
+- Modules: `div`, `image`, `svg`, style methods from `gpui-kit`; `v_flex`, `h_flex`, `Input`, `InputState`,
+  `v_virtual_list`, `VirtualListScrollHandle` from `gpui-base`. The generated `ui/gpui-kit.d.ts` is the reference.
+- Anything that must outlive the `application().run(...)` closure (watchers) must be leaked or stored globally:
+  the closure runs once and drops its captures.
 - Keystroke spelling is GPUI's: `escape`, `down`, `enter`, `ctrl-n`. Handle keys once (root `on_key_down`); an
   `InputState` `submit` hook as well fires Enter twice.
-- `hide` quits for now; a resident hidden window is Phase 5 work (check GPUI Linux `minimize`/unmap at this rev).
+- `hide` closes the special workspace through Hyprland; the process and window stay.
 - Theme tokens: `cx.theme().colors.{background,foreground,surface,border,input,muted,muted_foreground,primary,…}`.
 - Set `tracing` filter `dig_app=info,gpui_shell=info,gpui_kit::shell::script=info` to see script errors.
 

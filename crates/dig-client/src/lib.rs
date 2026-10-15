@@ -11,7 +11,11 @@ use anyhow::{Context, Result, bail};
 use dig_core::{FileKind, Hit};
 use serde::{Deserialize, Serialize};
 
+/// `$DIG_SOCKET`, else `$XDG_RUNTIME_DIR/dig.sock`.
 pub fn socket_path() -> PathBuf {
+    if let Some(path) = std::env::var_os("DIG_SOCKET").filter(|p| !p.is_empty()) {
+        return PathBuf::from(path);
+    }
     dig_core::paths::runtime_dir().join("dig.sock")
 }
 

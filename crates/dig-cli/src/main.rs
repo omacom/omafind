@@ -58,6 +58,8 @@ enum Command {
     Resume,
     /// Follow the daemon's progress until indexing is done.
     Watch,
+    /// Show or hide the search window (starts dig-app if it isn't running).
+    Toggle,
 }
 
 fn main() -> Result<()> {
@@ -70,7 +72,35 @@ fn main() -> Result<()> {
         Command::Pause => Client::connect()?.simple(&Request::Pause).map(|_| println!("paused")),
         Command::Resume => Client::connect()?.simple(&Request::Resume).map(|_| println!("resumed")),
         Command::Watch => watch(),
+        Command::Toggle => toggle(),
     }
+}
+
+/// Hyprland keeps the window in the `special:dig` workspace; toggling that is instant. Without a window yet, the
+/// app is started and the toggle waits for it to map (a few hundred milliseconds), the one time it is slow.
+fn toggle() -> Result<()> {
+    use std::process::{Command as Proc, Stdio};
+    let hypr = |args: &[&str]| Proc::new("hyprctl").args(args).output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+    let has_window = || hypr(&["-j", "clients"]).map(|j| j.contains("\"class\": \"dig\"")).unwrap_or(false);
+    if !has_window() {
+        let exe = std::env::current_exe()?.with_file_name("dig-app");
+        let program = if exe.exists() { exe } else { PathBuf::from("dig-app") };
+        Proc::new("setsid").arg("-f").arg(program).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().context("starting dig-app")?;
+        let started = Instant::now();
+        while !has_window() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // A fresh window whose rule put it in the special workspace is hidden: fall through to show it. Without
+        // the rules (not set up yet) the window is already on screen, and the toggle below would open an empty
+        // special workspace, so check first.
+        let in_special = hypr(&["-j", "clients"]).map(|j| j.contains("\"name\": \"special:dig\"")).unwrap_or(false);
+        if !in_special {
+            return Ok(());
+        }
+    }
+    let out = hypr(&["dispatch", "hl.dsp.workspace.toggle_special(\"dig\")"])?;
+    anyhow::ensure!(out.trim() == "ok", "hyprctl: {}", out.trim());
+    Ok(())
 }
 
 /// Prints the daemon's progress until nothing is pending and no worker runs.

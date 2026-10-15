@@ -1,120 +1,241 @@
 //! `dig-app`: the Dig search window. A GPUI Shell host that runs the QuickJS UI in `ui/` and lends it one host
-//! module, `dig` (search · open · reveal · copy · status · hide). Nothing else reaches the scripts: no filesystem, no
-//! processes.
+//! module, `dig`. Nothing else reaches the scripts: no filesystem, no processes.
 //!
-//! Phase 0 spike: the window, the UI, and the host-module round trip. `search` answers with canned results; the
-//! daemon socket comes in Phase 4/5.
+//! The process stays resident. Hyprland keeps the window in the `special:dig` workspace (window rules from
+//! `dig setup`), and `dig toggle` shows or hides that workspace, so showing is instant. The app follows Hyprland's
+//! event socket to know when it is shown (warm the query encoder, focus the field) and hidden (let it idle).
 //!
 //!   dig-app [--dev] [--ui DIR]      --dev: hot-reload ui/ on save and write ui/gpui-kit.d.ts
 
-use std::path::PathBuf;
+mod actions;
+mod hypr;
+mod theme;
+mod thumbs;
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use gpui_kit::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use dig_client::{Client, Request, Status};
+use dig_core::{FileKind, Locator};
+use gpui_kit::{App, AssetSource, Bounds, SharedString, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use gpui_shell::{AppAssets, Capabilities, HostError, HostModule, HostObject, HostValue, ShellRuntime};
 
-/// The TypeScript face of the `dig` module. `export_module` checks it against what is registered.
 const DIG_TYPES: &str = r#"
 /** One search hit: a file, and where in it the match is. */
 export interface Result {
   id: number;
   path: string;
+  /** The path with the home folder shortened, for display. */
+  shortPath: string;
   name: string;
   kind: "image" | "screenshot" | "pdf" | "doc" | "audio" | "video" | "code";
-  /** Page, seconds, line or character offset; null for a whole-file match (an image). */
+  chunkKind: string;
+  /** Page, seconds, line or character offset; null for a whole-file match. */
   locator: number | null;
   /** The locator for people: "p. 12", "03:41", "L88", or "". */
   locatorLabel: string;
   snippet: string;
+  score: number;
+  similarity: number | null;
+  matchedWords: string[];
 }
 export interface Answer { query: string; results: Result[]; tookMs: number }
-export interface Status { state: string; indexed: number; pending: number }
+export interface Root { path: string; code: boolean }
+export interface Status {
+  /** Whether digd answers. */
+  daemon: boolean;
+  /** Whether the window is currently shown (Hyprland's special workspace is open). */
+  visible: boolean;
+  /** Increments every time the window is shown; the script resets its search on a change. */
+  shown: number;
+  state: string;
+  files: number; indexed: number; pending: number; failed: number;
+  current: string | null;
+  paused: boolean; onBattery: boolean; powerSaver: boolean; queryEncoderLoaded: boolean;
+  roots: Root[];
+}
 export function search(query: string, options?: { limit?: number; kinds?: string[] }): Promise<Answer>;
+/** The small picture for a result, made on demand; null when the kind has none. */
+export function thumb(path: string, kind: string, locator: number | null): Promise<string | null>;
 export function status(): Status;
-/** Opens a result at its locator (mpv/evince/imv/editor/xdg-open). */
-export function open(id: number): boolean;
+export function open(path: string, kind: string, locator: number | null): boolean;
+export function reveal(path: string): boolean;
+export function copy(path: string): boolean;
 export function hide(): void;
 "#;
+
+/// The scripts' assets: their own directory (icons), plus the thumbnail cache by absolute path and nothing else.
+struct DigAssets {
+    app: AppAssets,
+    thumbs: PathBuf,
+}
+
+impl AssetSource for DigAssets {
+    fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
+        let candidate = Path::new(path);
+        if candidate.is_absolute() {
+            let Ok(full) = candidate.canonicalize() else { return Ok(None) };
+            if !full.starts_with(&self.thumbs) {
+                return Ok(None);
+            }
+            return Ok(Some(std::fs::read(full)?.into()));
+        }
+        self.app.load(path)
+    }
+
+    fn list(&self, path: &str) -> anyhow::Result<Vec<SharedString>> {
+        self.app.list(path)
+    }
+}
+
+#[derive(Default)]
+struct State {
+    status: Option<Status>,
+    daemon: bool,
+    visible: bool,
+    shown: u64,
+    query_words: Vec<String>,
+}
+
+type Shared = Arc<Mutex<State>>;
+
+enum Note {
+    Status(Status),
+    Daemon(bool),
+    Shown,
+    Hidden,
+    Theme,
+}
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Result<T, HostError> {
     gpui_shell::with_current_app(f).ok_or_else(|| HostError::new("dig: no live App for this call"))
 }
 
-/// Canned results for the spike; Phase 4 replaces this with the daemon's answer.
-fn canned(query: &str, limit: usize) -> Vec<HostValue> {
-    let rows: [(&str, &str, &str, Option<f64>, &str, &str); 6] = [
-        ("~/Pictures/2024/beach-day.jpg", "beach-day.jpg", "image", None, "", "a dog running on the beach"),
-        ("~/Documents/lease.pdf", "lease.pdf", "pdf", Some(12.0), "p. 12", "Tenants may keep up to two pets with the landlord's written consent"),
-        ("~/Music/memos/standup.m4a", "standup.m4a", "audio", Some(221.0), "03:41", "…I haven't been sleeping well, I keep waking up at three…"),
-        ("~/Videos/safari.mp4", "safari.mp4", "video", Some(74.0), "01:14", "zebra crossing the road"),
-        ("~/Documents/notes/sleep.md", "sleep.md", "doc", Some(0.0), "", "Keep the bedroom cool and dark; no screens before bed."),
-        ("~/dev/dig/crates/dig-core/src/lib.rs", "lib.rs", "code", Some(88.0), "L88", "pub fn query(text: &str) -> String"),
-    ];
-    let words: Vec<String> = query.split_whitespace().map(|w| w.to_lowercase()).collect();
-    let mut hits: Vec<(usize, HostValue)> = rows
-        .iter()
-        .enumerate()
-        .map(|(id, (path, name, kind, locator, label, snippet))| {
-            let haystack = format!("{path} {snippet}").to_lowercase();
-            let score = words.iter().filter(|w| haystack.contains(w.as_str())).count();
-            let value = HostObject::new()
-                .field("id", id as f64)
-                .field("path", *path)
-                .field("name", *name)
-                .field("kind", *kind)
-                .field("locator", locator.map(HostValue::Number).unwrap_or(HostValue::Null))
-                .field("locatorLabel", *label)
-                .field("snippet", *snippet);
-            (score, HostValue::from(value))
-        })
-        .filter(|(score, _)| *score > 0)
-        .collect();
-    hits.sort_by(|a, b| b.0.cmp(&a.0));
-    hits.into_iter().take(limit).map(|(_, v)| v).collect()
+fn kind_of(name: &str) -> Result<FileKind, HostError> {
+    FileKind::parse(name).ok_or_else(|| HostError::new(format!("unknown kind {name}")))
 }
 
-fn dig_module() -> HostModule {
+fn hit_value(hit: &dig_core::Hit) -> HostValue {
+    HostObject::new()
+        .field("id", hit.chunk_id as f64)
+        .field("path", hit.path.as_str())
+        .field("shortPath", dig_core::paths::tilde(Path::new(&hit.path)))
+        .field("name", hit.name.as_str())
+        .field("kind", hit.kind.as_str())
+        .field("chunkKind", hit.chunk_kind.as_str())
+        .field("locator", hit.locator.map(|l| HostValue::Number(l.value())).unwrap_or(HostValue::Null))
+        .field("locatorLabel", hit.locator_label.as_str())
+        .field("snippet", hit.snippet.as_str())
+        .field("score", hit.score)
+        .field("similarity", hit.similarity.map(|s| HostValue::Number(s as f64)).unwrap_or(HostValue::Null))
+        .field("matchedWords", HostValue::Array(hit.matched_words.iter().map(|w| HostValue::from(w.as_str())).collect()))
+        .into()
+}
+
+fn status_value(state: &State) -> HostValue {
+    let s = state.status.clone().unwrap_or_default();
+    HostObject::new()
+        .field("daemon", state.daemon)
+        .field("visible", state.visible)
+        .field("shown", state.shown as f64)
+        .field("state", if state.daemon { s.state.as_str() } else { "no_daemon" })
+        .field("files", s.files as f64)
+        .field("indexed", s.indexed as f64)
+        .field("pending", s.pending as f64)
+        .field("failed", s.failed as f64)
+        .field("current", s.current.as_deref().map(|c| HostValue::from(dig_core::paths::tilde(Path::new(c)))).unwrap_or(HostValue::Null))
+        .field("paused", s.paused)
+        .field("onBattery", s.on_battery)
+        .field("powerSaver", s.power_saver)
+        .field("queryEncoderLoaded", s.query_encoder_loaded)
+        .field("roots", HostValue::Array(s.roots.iter().map(|r| HostObject::new().field("path", dig_core::paths::tilde(&r.path)).field("code", r.code).into()).collect()))
+        .into()
+}
+
+fn dig_module(shared: Shared) -> HostModule {
+    let for_status = shared.clone();
+    let for_search = shared.clone();
+    let for_open = shared.clone();
     HostModule::new("dig")
         .declarations(DIG_TYPES)
-        .function("status", |_| {
-            Ok(HostObject::new().field("state", "spike: no daemon").field("indexed", 0.0).field("pending", 0.0).into())
-        })
-        .async_function("search", |arguments| {
-            // Synchronous half, on the main thread: check the arguments, copy what the work needs out.
+        .function("status", move |_| Ok(status_value(&for_status.lock().unwrap())))
+        .async_function("search", move |arguments| {
             let query = arguments.string(0)?.to_owned();
-            let limit = arguments
-                .get(1)
-                .and_then(|options| options.get("limit"))
-                .and_then(|v| match v {
-                    HostValue::Number(n) => Some(*n as usize),
-                    _ => None,
-                })
-                .unwrap_or(20);
+            let options = arguments.get(1);
+            let limit = options.and_then(|o| o.get("limit")).and_then(|v| match v { HostValue::Number(n) => Some(*n as usize), _ => None }).unwrap_or(30);
+            let kinds: Vec<FileKind> = options
+                .and_then(|o| o.get("kinds"))
+                .and_then(|v| match v { HostValue::Array(items) => Some(items.iter().filter_map(|i| match i { HostValue::Str(s) => FileKind::parse(s), _ => None }).collect()), _ => None })
+                .unwrap_or_default();
+            for_search.lock().unwrap().query_words = dig_core::ranking::query_words(&query);
             let executor = with_app(|cx| cx.background_executor().clone())?;
-            // Asynchronous half, on the background executor: what the daemon round trip will be.
+            tracing::info!("search {query:?}");
             Ok(async move {
                 let started = Instant::now();
-                executor.timer(Duration::from_millis(15)).await;
-                let results = canned(&query, limit);
+                let ((hits, _took), query) = executor
+                    .spawn(async move { Client::connect().and_then(|mut c| c.search(&query, limit, kinds)).map(|r| (r, query)) })
+                    .await
+                    .map_err(|e| HostError::new(format!("{e:#}")))?;
+                tracing::info!("search {query:?}: {} hits in {:.0} ms", hits.len(), started.elapsed().as_secs_f64() * 1000.0);
                 Ok(HostObject::new()
                     .field("query", query)
-                    .field("results", HostValue::Array(results))
+                    .field("results", HostValue::Array(hits.iter().map(hit_value).collect()))
                     .field("tookMs", started.elapsed().as_secs_f64() * 1000.0)
                     .into())
             })
         })
-        .function("open", |arguments| {
-            let id = arguments.integer(0)?;
-            tracing::info!("open result {id} (spike: nothing launched)");
-            eprintln!("dig: open result {id}");
+        .async_function("thumb", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            let kind = kind_of(arguments.string(1)?)?;
+            let locator = arguments.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n), _ => None });
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let thumb = executor.spawn(async move { thumbs::get(&path, kind, locator) }).await;
+                Ok(thumb.map(|p| HostValue::from(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
+            })
+        })
+        .function("open", move |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            let kind = kind_of(arguments.string(1)?)?;
+            let locator = arguments.get(2).and_then(|v| match v { HostValue::Number(n) => Some(*n), _ => None });
+            let locator = match (kind, locator) {
+                (FileKind::Pdf, Some(p)) => Some(Locator::Page(p as u32)),
+                (FileKind::Audio | FileKind::Video, Some(s)) => Some(Locator::Seconds(s)),
+                (FileKind::Code, Some(l)) => Some(Locator::Line(l as u32)),
+                _ => None,
+            };
+            let words = for_open.lock().unwrap().query_words.clone();
+            actions::open(&path, kind, locator, &words).map_err(|e| HostError::new(format!("{e:#}")))?;
+            hide_window();
+            Ok(HostValue::from(true))
+        })
+        .function("reveal", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            actions::reveal(&path).map_err(|e| HostError::new(format!("{e:#}")))?;
+            hide_window();
+            Ok(HostValue::from(true))
+        })
+        .function("copy", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            actions::copy(&path).map_err(|e| HostError::new(format!("{e:#}")))?;
             Ok(HostValue::from(true))
         })
         .function("hide", |_| {
-            // Phase 5 hides the resident window; the spike just quits.
-            eprintln!("dig: hide");
-            with_app(|cx| cx.quit())?;
+            hide_window();
             Ok(HostValue::Null)
         })
+}
+
+/// Closes the special workspace if it is open. Off a thread: Hyprland answers in a few ms, but never block a frame.
+fn hide_window() {
+    std::thread::spawn(|| {
+        if hypr::is_shown().unwrap_or(false) {
+            if let Err(error) = hypr::toggle() {
+                tracing::warn!("hide: {error:#}");
+            }
+        }
+    });
 }
 
 /// Where the UI scripts are: `--ui DIR`, else `/usr/share/dig/ui` when installed, else the repo's `ui/`.
@@ -129,6 +250,37 @@ fn ui_root(explicit: Option<PathBuf>) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui").canonicalize().unwrap_or_else(|_| PathBuf::from("ui"))
 }
 
+/// Follows the daemon's status stream; reconnects with a backoff while it is down.
+fn follow_daemon(tx: async_channel::Sender<Note>) {
+    loop {
+        match Client::connect() {
+            Ok(client) => {
+                let _ = tx.send_blocking(Note::Daemon(true));
+                let tx2 = tx.clone();
+                let _ = client.subscribe(|event| {
+                    if let dig_client::Event::Status(status) = event {
+                        return tx2.send_blocking(Note::Status(status)).is_ok();
+                    }
+                    true
+                });
+                let _ = tx.send_blocking(Note::Daemon(false));
+            }
+            Err(_) => {
+                let _ = tx.send_blocking(Note::Daemon(false));
+            }
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+}
+
+fn tell_daemon(request: Request) {
+    std::thread::spawn(move || {
+        if let Ok(mut client) = Client::connect() {
+            let _ = client.simple(&request);
+        }
+    });
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let mut dev = cfg!(debug_assertions);
@@ -138,6 +290,10 @@ fn main() {
             "--dev" => dev = true,
             "--release-ui" => dev = false,
             "--ui" => ui = args.next().map(PathBuf::from),
+            "--version" => {
+                println!("dig-app {}", env!("CARGO_PKG_VERSION"));
+                return;
+            }
             other => {
                 eprintln!("dig-app: unknown argument {other}");
                 std::process::exit(2);
@@ -146,10 +302,7 @@ fn main() {
     }
     let ui = ui_root(ui);
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("dig_app=info,gpui_shell=info,gpui_kit::shell::script=info")),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("dig_app=info,gpui_shell=info,gpui_kit::shell::script=info")))
         .with_writer(std::io::stderr)
         .init();
 
@@ -161,21 +314,64 @@ fn main() {
         }
     };
     if dev {
-        // Editor completion against exactly the runtime that runs the scripts.
         match gpui_shell::write_type_declarations_with_components(&ui, &components) {
-            Ok(written) => tracing::info!("wrote {}", written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ")),
+            Ok(_) => tracing::info!("wrote {}", ui.join("gpui-kit.d.ts").display()),
             Err(error) => tracing::warn!("couldn't write gpui-kit.d.ts: {error}"),
         }
     }
 
-    gpui_kit::application().with_assets(AppAssets::new(ui.clone())).run(move |cx| {
+    let shared: Shared = Arc::new(Mutex::new(State::default()));
+    let (tx, rx) = async_channel::unbounded::<Note>();
+    {
+        let tx = tx.clone();
+        std::thread::Builder::new().name("dig-daemon".into()).spawn(move || follow_daemon(tx)).expect("thread");
+    }
+    {
+        let tx = tx.clone();
+        std::thread::Builder::new()
+            .name("dig-hypr".into())
+            .spawn(move || {
+                if let Err(error) = hypr::events(|event| {
+                    let _ = tx.send_blocking(match event {
+                        hypr::Event::Shown => Note::Shown,
+                        hypr::Event::Hidden => Note::Hidden,
+                    });
+                }) {
+                    tracing::warn!("not following Hyprland: {error:#}");
+                }
+            })
+            .expect("thread");
+    }
+    // The watcher lives as long as the process: dropping it would stop the inotify stream.
+    {
+        let tx = tx.clone();
+        match theme::watch(move || {
+            let _ = tx.send_blocking(Note::Theme);
+        }) {
+            Ok(watcher) => std::mem::forget(watcher),
+            Err(error) => tracing::warn!("not watching the theme: {error}"),
+        }
+    }
+
+    // The first search must not pay for loading the query encoder: ask for it now, and again on every show.
+    tell_daemon(Request::Warm);
+    let font = theme::font_family();
+    let thumbs_dir = dig_core::paths::cache_dir().join("thumbs");
+    let _ = std::fs::create_dir_all(&thumbs_dir);
+    let thumbs_dir = thumbs_dir.canonicalize().unwrap_or(thumbs_dir);
+
+    gpui_kit::application().with_assets(DigAssets { app: AppAssets::new(ui.clone()), thumbs: thumbs_dir.clone() }).run(move |cx| {
         gpui_shell::init_with_components(cx, &components);
         if dev {
             gpui_shell::set_development_mode(true);
         }
-        // The scripts may read their own directory (icons) and nothing else.
-        gpui_shell::set_capabilities(Capabilities::new().read_roots([ui.clone()]));
-        gpui_shell::export_module(dig_module()).expect("the `dig` module matches its declarations");
+        match theme::Palette::load() {
+            Ok(palette) => palette.apply(&font, cx),
+            Err(error) => tracing::warn!("no Omarchy theme ({error:#}): using the default palette"),
+        }
+        // The scripts may read their own directory (icons) and the thumbnail cache, and nothing else.
+        gpui_shell::set_capabilities(Capabilities::new().read_roots([ui.clone(), thumbs_dir.clone()]));
+        gpui_shell::export_module(dig_module(shared.clone())).expect("the `dig` module matches its declarations");
         gpui_shell::on_exit_request(|_, _, cx| cx.quit());
 
         let runtime = match ShellRuntime::new_with_components(cx, components) {
@@ -189,25 +385,71 @@ fn main() {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(Bounds::centered(None, size(px(880.), px(600.)), cx))),
             titlebar: Some(TitlebarOptions { title: Some("Dig".into()), ..Default::default() }),
-            app_id: Some("dig".into()),
+            app_id: Some(hypr::APP_ID.into()),
             ..Default::default()
         };
         let app_root = ui.clone();
+        let runtime_for_window = runtime.clone();
+        let root_cell: Arc<Mutex<Option<gpui_kit::Entity<gpui_shell::ShellRoot>>>> = Arc::new(Mutex::new(None));
+        let root_sink = root_cell.clone();
         let window = cx
             .open_window(options, move |window, cx| {
-                let root = runtime.load(&app_root, window, cx);
+                let root = runtime_for_window.load(&app_root, window, cx);
                 if dev {
-                    match runtime.watch(&root, window, cx) {
+                    match runtime_for_window.watch(&root, window, cx) {
                         Ok(watch) => watch.forget(),
                         Err(error) => tracing::warn!("not watching {}: {error}", app_root.display()),
                     }
                 }
+                *root_sink.lock().unwrap() = Some(root.clone());
                 root
             })
             .expect("failed to open the Dig window");
 
-        // Come forward: launched from a terminal, a GPUI window opens behind it. Deferred to a task, outside any
-        // platform callback (see gpui-shell's host.rs for the Wayland borrow panic this avoids).
+        // Notes from the threads land on the main thread here: the script is told to re-describe itself.
+        let shared_notes = shared.clone();
+        let font = font.clone();
+        cx.spawn(async move |cx| {
+            while let Ok(note) = rx.recv().await {
+                let _ = cx.update(|cx| {
+                    let mut refresh = true;
+                    match note {
+                        Note::Status(status) => shared_notes.lock().unwrap().status = Some(status),
+                        Note::Daemon(up) => shared_notes.lock().unwrap().daemon = up,
+                        Note::Shown => {
+                            {
+                                let mut s = shared_notes.lock().unwrap();
+                                s.visible = true;
+                                s.shown += 1;
+                            }
+                            tell_daemon(Request::Warm);
+                            let _ = window.update(cx, |_, window, _| window.activate_window());
+                        }
+                        Note::Hidden => {
+                            shared_notes.lock().unwrap().visible = false;
+                            tell_daemon(Request::Idle);
+                            refresh = false;
+                        }
+                        Note::Theme => match theme::Palette::load() {
+                            Ok(palette) => {
+                                tracing::info!("theme changed: retinting");
+                                palette.apply(&font, cx);
+                            }
+                            Err(error) => tracing::warn!("theme: {error:#}"),
+                        },
+                    }
+                    if refresh {
+                        if let Some(root) = root_cell.lock().unwrap().clone() {
+                            if let Err(error) = runtime.refresh(&root, cx) {
+                                tracing::warn!("refresh: {error}");
+                            }
+                        }
+                    }
+                });
+            }
+        })
+        .detach();
+
         cx.spawn(async move |cx| {
             cx.update(|cx| {
                 cx.activate(true);
