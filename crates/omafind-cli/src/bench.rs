@@ -172,10 +172,12 @@ fn percentiles(mut ms: Vec<f64>) -> (f64, f64) {
 pub fn run(sizes: &[usize], model: bool) -> Result<()> {
     let dir = omafind_core::paths::cache_dir().join("bench");
     std::fs::create_dir_all(&dir)?;
-    println!(
+    crate::ui::intro("bench", "search latency on synthetic indexes")?;
+    crate::ui::line(crate::ui::bold(format!(
         "{:<10} {:>10} {:>14} {:>14} {:>14} {:>12}",
         "chunks", "load", "quick p50/95", "full p50/95", "photos p50/95", "memory"
-    );
+    )));
+
     for &n in sizes {
         let path = dir.join(format!("bench-{n}.sqlite"));
         if !path.exists() {
@@ -237,7 +239,7 @@ pub fn run(sizes: &[usize], model: bool) -> Result<()> {
         let quick = time(false, &options)?;
         let full = time(true, &options)?;
         let filtered = time(true, &photos)?;
-        println!(
+        crate::ui::line(format!(
             "{:<10} {:>8.2} s {:>6.1}/{:<5.1}ms {:>6.1}/{:<5.1}ms {:>6.1}/{:<5.1}ms {:>9} MB",
             n,
             load,
@@ -248,10 +250,10 @@ pub fn run(sizes: &[usize], model: bool) -> Result<()> {
             filtered.0,
             filtered.1,
             index.bytes() >> 20
-        );
+        ));
     }
     if model {
-        println!();
+        crate::ui::line("");
         let models = omafind_embed::Models::locate(&omafind_core::model::dir())?;
         let queries = [
             "a dog on the beach",
@@ -280,11 +282,13 @@ pub fn run(sizes: &[usize], model: bool) -> Result<()> {
                 }
             }
             let (p50, p95) = percentiles(ms);
-            println!(
+            crate::ui::line(format!(
                 "query encoder on {:<4} load {load:.2} s, embed p50 {p50:.1} ms, p95 {p95:.1} ms",
                 if cpu { "CPU" } else { "GPU" }
-            );
+            ));
         }
     }
+    crate::ui::line("");
+    cliclack::outro("Budget: under 60 ms for a full search at 300k chunks")?;
     Ok(())
 }

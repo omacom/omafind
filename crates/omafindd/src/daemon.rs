@@ -44,6 +44,8 @@ pub struct Shared {
 #[derive(Default, Clone)]
 pub struct State {
     pub paused: bool,
+    /// Setting up the folder watches (one inotify watch per directory): seconds on a big tree.
+    pub starting: bool,
     pub power: PowerState,
     pub worker_running: bool,
     pub crawling: bool,
@@ -65,6 +67,8 @@ impl State {
             "waiting_for_ac"
         } else if self.config.power.pause_in_power_saver && self.power.power_saver {
             "paused_power_saver"
+        } else if self.starting {
+            "starting"
         } else if self.crawling {
             "crawling"
         } else if self.worker_running {
@@ -81,12 +85,15 @@ pub fn code_index_path(index_path: &std::path::Path) -> PathBuf {
 }
 
 /// The status, from the shared state and a store connection (code index counts included).
-pub fn status(shared: &Shared, store: &Store, searcher: &Searcher) -> Result<Status> {
+pub fn status(
+    shared: &Shared,
+    store: &Store,
+    code_store: &Store,
+    searcher: &Searcher,
+) -> Result<Status> {
     let state = shared.state.lock().unwrap().clone();
     let stats = store.stats()?;
-    let code = Store::open(&code_index_path(&searcher.index_path))
-        .and_then(|s| s.stats())
-        .unwrap_or_default();
+    let code = code_store.stats()?;
     let mut kinds: Vec<(omafind_core::FileKind, i64, i64)> = Vec::new();
     for (kind, done, total) in stats.progress.iter().chain(&code.progress) {
         let Some(kind) = omafind_core::FileKind::parse(kind) else {
@@ -216,17 +223,13 @@ pub fn main() -> Result<()> {
     {
         let mut state = shared.state.lock().unwrap();
         state.paused = store.get_meta("paused")?.as_deref() == Some("1");
+        state.starting = true;
         state.roots = roots.clone();
         state.config = config.clone();
     }
 
     // Threads: the socket server, the power watcher, signals.
-    crate::server::start(
-        shared.clone(),
-        searcher.clone(),
-        tx.clone(),
-        index_path.clone(),
-    )?;
+    crate::server::start(shared.clone(), searcher.clone(), tx.clone())?;
     {
         let tx = tx.clone();
         std::thread::Builder::new()
@@ -260,6 +263,8 @@ pub fn main() -> Result<()> {
         last_status: Instant::now(),
     };
     coordinator.watch_roots();
+    // The first crawl is queued below: report it as begun, so nobody sees an idle daemon in between.
+    coordinator.shared.state.lock().unwrap().crawling = true;
     crate::log!(
         "omafindd {} up: {} roots, index {}",
         env!("CARGO_PKG_VERSION"),
@@ -336,7 +341,12 @@ impl Coordinator {
             .map(|r| r.path.clone())
             .collect();
         self.watcher = None;
-        match crate::watcher::start(roots, self.tx.clone()) {
+        // One inotify watch per directory takes a while on a big tree: say so rather than look idle.
+        self.shared.state.lock().unwrap().starting = true;
+        let _ = self.send_status();
+        let started = crate::watcher::start(roots, self.tx.clone());
+        self.shared.state.lock().unwrap().starting = false;
+        match started {
             Ok(watcher) => self.watcher = Some(watcher),
             Err(error) => crate::log!("no file watcher: {error}"),
         }
@@ -640,7 +650,7 @@ impl Coordinator {
 
     fn send_status(&mut self) -> Result<()> {
         self.last_status = Instant::now();
-        let status = status(&self.shared, &self.store, &self.searcher)?;
+        let status = status(&self.shared, &self.store, &self.code_store, &self.searcher)?;
         broadcast(&self.shared, Event::Status(status));
         Ok(())
     }

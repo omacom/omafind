@@ -62,3 +62,98 @@ pub fn choose<T: Clone + Eq>(
         .interact()
         .map_err(|e| stopped(e, what))
 }
+
+// --- the look ----------------------------------------------------------------------------------------------------
+
+use console::{Style, style};
+
+/// cliclack's theme with the active bar in ANSI blue, which Omarchy's terminal themes map to the theme's accent, so
+/// the frame follows the desktop's colors.
+struct Omafind;
+
+impl cliclack::Theme for Omafind {
+    fn bar_color(&self, state: &cliclack::ThemeState) -> Style {
+        match state {
+            cliclack::ThemeState::Active => Style::new().blue(),
+            cliclack::ThemeState::Cancel => Style::new().red(),
+            cliclack::ThemeState::Submit => Style::new().bright().black(),
+            cliclack::ThemeState::Error(_) => Style::new().yellow(),
+        }
+    }
+}
+
+pub fn init() {
+    cliclack::set_theme(Omafind);
+}
+
+/// Whether a command's output can be framed: both streams on a terminal. Piped or scripted output stays plain.
+pub fn framed() -> bool {
+    std::io::stdout().is_terminal() && std::io::stderr().is_terminal()
+}
+
+/// `┌   omafind  doctor   checks the model, engine, tools and setup`
+pub fn intro(command: &str, subtitle: impl Display) -> Result<()> {
+    let subtitle = subtitle.to_string();
+    let badge = style(" omafind ").black().on_blue().bold();
+    let title = if subtitle.is_empty() {
+        format!("{badge} {}", style(command).bold())
+    } else {
+        format!(
+            "{badge} {}  {}",
+            style(command).bold(),
+            style(subtitle).dim()
+        )
+    };
+    cliclack::intro(title)?;
+    Ok(())
+}
+
+/// A line inside the frame, without the blank line a log adds after itself.
+pub fn line(text: impl Display) {
+    eprintln!("{}  {text}", style("│").bright().black());
+}
+
+/// `✓` green or `✗` red.
+pub fn mark(ok: bool) -> String {
+    if ok {
+        style("✓").green().to_string()
+    } else {
+        style("✗").red().to_string()
+    }
+}
+
+pub fn dim(text: impl Display) -> String {
+    style(text).dim().to_string()
+}
+
+pub fn bold(text: impl Display) -> String {
+    style(text).bold().to_string()
+}
+
+/// A short pause between lines that appear one after another, so a report reads as it arrives rather than landing
+/// in one block. Nothing when the output isn't a terminal.
+pub fn beat(ms: u64) {
+    if std::io::stderr().is_terminal() {
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+    }
+}
+
+/// Runs `work` under a spinner saying `doing`, shown at least `min_ms` on a terminal so a fast step still registers,
+/// and ends the spinner with what `done` says about the result.
+pub fn step<T>(
+    doing: &str,
+    min_ms: u64,
+    work: impl FnOnce() -> T,
+    done: impl FnOnce(&T) -> String,
+) -> T {
+    let spinner = cliclack::spinner();
+    spinner.start(doing);
+    let started = std::time::Instant::now();
+    let result = work();
+    if std::io::stderr().is_terminal() {
+        let left = std::time::Duration::from_millis(min_ms).saturating_sub(started.elapsed());
+        std::thread::sleep(left);
+    }
+    spinner.stop(done(&result));
+    result
+}

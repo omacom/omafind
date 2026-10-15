@@ -198,7 +198,33 @@ impl Store {
         Ok(store)
     }
 
+    /// Whether this index is already the current schema with everything in place, which most opens are: then
+    /// opening writes nothing, so it never waits on the worker or a crawl holding the write lock.
+    fn current(&self) -> Result<bool> {
+        let version: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap_or(None);
+        if version.as_deref() != Some(&SCHEMA_VERSION.to_string()) {
+            return Ok(false);
+        }
+        let objects: i64 = self.conn.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('names_fts', 'vectors_file', 'files_names_au', 'chunks_ad_v2')",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(objects == 4)
+    }
+
     fn migrate(&self) -> Result<()> {
+        if self.current()? {
+            return Ok(());
+        }
         // Schema 1 kept vectors in a `vec0` table whose delete trigger must go before anything is deleted.
         let from_vec0 = self.conn.query_row(
             "SELECT count(*) FROM sqlite_master WHERE name = 'vec_chunks'",
@@ -309,7 +335,10 @@ impl Store {
             Some(v) if v > SCHEMA_VERSION => {
                 bail!("this index was written by a newer Omafind (schema {v})")
             }
-            Some(_) => self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?,
+            Some(v) if v < SCHEMA_VERSION => {
+                self.set_meta("schema_version", &SCHEMA_VERSION.to_string())?
+            }
+            Some(_) => {}
         }
         Ok(())
     }
@@ -629,9 +658,16 @@ impl Store {
             .filter(|(_, path)| !keep.contains(path))
             .map(|(id, _)| id)
             .collect();
-        for id in &gone {
-            self.conn.execute("DELETE FROM files WHERE id = ?1", [id])?;
+        // One transaction: a removed folder can be tens of thousands of files, each taking its chunks, vectors and
+        // keywords with it.
+        let tx = self.conn.unchecked_transaction()?;
+        {
+            let mut delete = tx.prepare("DELETE FROM files WHERE id = ?1")?;
+            for id in &gone {
+                delete.execute([id])?;
+            }
         }
+        tx.commit()?;
         Ok(gone.len())
     }
 

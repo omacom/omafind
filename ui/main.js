@@ -1008,6 +1008,7 @@ export default class Omafind extends View {
     else if (this.searched !== "" && this.tookMs !== null) left = `${count(this.results.length)} ${this.results.length === 1 ? "result" : "results"}${s.pending ? ` · indexing, ${count(s.pending)} left` : ""}`;
     else if (s.state === "indexing") left = `Indexing ${count(s.pending)} left${s.current ? " · " + s.current.split("/").pop() : ""}${s.eta != null ? " · " + duration(s.eta) : ""}`;
     else if (s.state === "crawling") left = "Looking for new files";
+    else if (s.state === "starting") left = "Starting: watching your folders";
     else left = `${count(s.indexed)} files · up to date`;
     let hints;
     if (this.mode === "setup") hints = "↑↓ move · space toggle · ⏎ start · esc back";

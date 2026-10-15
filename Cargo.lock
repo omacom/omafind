@@ -5911,6 +5911,7 @@ dependencies = [
  "anyhow",
  "clap",
  "cliclack",
+ "console",
  "omafind-client",
  "omafind-core",
  "omafind-embed",

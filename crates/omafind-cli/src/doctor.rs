@@ -1,15 +1,32 @@
-//! `omafind doctor`: everything Omafind needs, checked, with what to do about what's missing.
+//! `omafind doctor`: everything Omafind needs, checked, with what to do about what's missing. On a terminal the
+//! checks run group by group under a spinner and each group's results appear as it finishes.
 
 use std::process::Command;
 
 use anyhow::Result;
+use omafind_core::paths::tilde;
 
 use omafind_setup::{download, hypr};
 
+use crate::ui;
+
 struct Check {
     ok: bool,
+    /// Missing but not needed: shown apart from a failure, and not counted as one.
+    optional_missing: bool,
     what: String,
     detail: String,
+}
+
+impl Check {
+    fn new(ok: bool, what: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            ok,
+            optional_missing: false,
+            what: what.into(),
+            detail: detail.into(),
+        }
+    }
 }
 
 fn have(cmd: &str) -> bool {
@@ -20,60 +37,65 @@ fn have(cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
-pub fn run(json: bool) -> Result<bool> {
-    let mut checks = Vec::new();
-    let models = omafind_core::model::dir();
-    for file in [&download::TEXT, &download::MEDIA] {
-        let path = models.join(file.name);
-        let size = std::fs::metadata(&path).map(|m| m.len()).ok();
-        checks.push(Check {
-            ok: size == Some(file.bytes),
-            what: format!("model {}", file.name),
-            detail: match size {
-                Some(s) if s == file.bytes => format!(
-                    "{} MB in {}",
-                    s / 1_000_000,
-                    omafind_core::paths::tilde(&models)
-                ),
+fn models() -> Vec<Check> {
+    let dir = omafind_core::model::dir();
+    [&download::TEXT, &download::MEDIA]
+        .into_iter()
+        .map(|file| {
+            let size = std::fs::metadata(dir.join(file.name)).map(|m| m.len()).ok();
+            let detail = match size {
+                Some(s) if s == file.bytes => format!("{} MB in {}", s / 1_000_000, tilde(&dir)),
                 Some(s) => format!("wrong size {s}: run `omafind setup`"),
                 None => "missing: run `omafind setup`".into(),
-            },
-        });
-    }
+            };
+            Check::new(size == Some(file.bytes), file.name, detail)
+        })
+        .collect()
+}
+
+fn engine() -> Vec<Check> {
+    let mut checks = Vec::new();
     let (backends, gpu) = omafind_embed::probe();
-    checks.push(Check {
-        ok: !backends.is_empty(),
-        what: format!("engine llama.cpp {}", omafind_embed::LLAMA_VERSION),
-        detail: if backends.is_empty() {
+    checks.push(Check::new(
+        !backends.is_empty(),
+        format!("llama.cpp {}", omafind_embed::LLAMA_VERSION),
+        if backends.is_empty() {
             "no ggml backends loaded".into()
         } else {
             format!(
-                "backends {}{}",
+                "{}{}",
                 backends.join(", "),
                 if gpu {
-                    " (GPU found)"
+                    " · GPU found"
                 } else {
-                    " (no GPU: CPU only)"
+                    " · no GPU, CPU only"
                 }
             )
         },
-    });
+    ));
     if have("vulkaninfo") {
-        let out = Command::new("vulkaninfo").arg("--summary").output().ok();
-        let device = out.and_then(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .find(|l| l.contains("deviceName"))
-                .map(|l| l.split('=').nth(1).unwrap_or("").trim().to_owned())
-        });
-        checks.push(Check {
-            ok: device.is_some(),
-            what: "Vulkan device".into(),
-            detail: device
+        let device = Command::new("vulkaninfo")
+            .arg("--summary")
+            .output()
+            .ok()
+            .and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .find(|l| l.contains("deviceName"))
+                    .map(|l| l.split('=').nth(1).unwrap_or("").trim().to_owned())
+            });
+        checks.push(Check::new(
+            device.is_some(),
+            "Vulkan device",
+            device
                 .unwrap_or_else(|| "none (vulkan-icd-loader + a driver like vulkan-radeon)".into()),
-        });
+        ));
     }
-    for (cmd, package, why) in [
+    checks
+}
+
+fn tools() -> Vec<Check> {
+    let mut checks: Vec<Check> = [
         ("ffmpeg", "ffmpeg", "audio and video"),
         ("ffmpegthumbnailer", "ffmpegthumbnailer", "thumbnails"),
         ("pdftotext", "poppler", "PDF text"),
@@ -87,76 +109,82 @@ pub fn run(json: bool) -> Result<bool> {
         ("evince", "evince", "opening PDFs at a page"),
         ("imv", "imv", "opening photos"),
         ("wl-copy", "wl-clipboard", "copying files"),
-    ] {
-        checks.push(Check {
-            ok: have(cmd),
-            what: format!("{cmd} ({why})"),
-            detail: if have(cmd) {
-                "present".into()
+    ]
+    .into_iter()
+    .map(|(cmd, package, why)| {
+        let ok = have(cmd);
+        Check::new(
+            ok,
+            cmd,
+            if ok {
+                why.to_owned()
             } else {
-                format!("missing: sudo pacman -S {package}")
+                format!("missing: sudo pacman -S {package} ({why})")
             },
-        });
-    }
+        )
+    })
+    .collect();
+    // Optional: without it only .doc and .rtf are skipped.
     let pandoc = have("pandoc");
     checks.push(Check {
-        ok: true,
-        what: "pandoc (doc, rtf, optional)".into(),
-        detail: if pandoc {
-            "present".into()
-        } else {
-            "not installed: .doc/.rtf files are skipped (pacman -S pandoc-cli)".into()
-        },
+        optional_missing: !pandoc,
+        ..Check::new(
+            true,
+            "pandoc",
+            if pandoc {
+                ".doc and .rtf"
+            } else {
+                "optional, not installed: .doc and .rtf are skipped (pacman -S pandoc-cli)"
+            },
+        )
     });
+    checks
+}
 
-    let config = omafind_core::config::Config::load();
-    match &config {
+fn index() -> Vec<Check> {
+    let mut checks = Vec::new();
+    match omafind_core::config::Config::load() {
         Ok(c) => {
-            let folders = c.folders();
-            checks.push(Check {
-                ok: !folders.is_empty() || !c.code_roots().is_empty(),
-                what: "folders to index".into(),
-                detail: if folders.is_empty() && c.code_roots().is_empty() {
-                    "none: run `omafind setup` or `omafind index <folders>`".into()
+            let all: Vec<String> = c
+                .folders()
+                .iter()
+                .chain(c.code_roots().iter())
+                .map(|p| tilde(p))
+                .collect();
+            checks.push(Check::new(
+                !all.is_empty(),
+                "folders",
+                if all.is_empty() {
+                    "none: run `omafind setup` or `omafind index <folders>`".to_owned()
                 } else {
-                    folders
-                        .iter()
-                        .chain(c.code_roots().iter())
-                        .map(|p| omafind_core::paths::tilde(p))
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    all.join(", ")
                 },
-            });
+            ));
         }
-        Err(e) => checks.push(Check {
-            ok: false,
-            what: "config".into(),
-            detail: format!("{e:#}"),
-        }),
+        Err(e) => checks.push(Check::new(false, "config", format!("{e:#}"))),
     }
-    let index = omafind_core::paths::index_path();
-    checks.push(Check {
-        ok: index.exists(),
-        what: "index".into(),
-        detail: if index.exists() {
-            omafind_core::paths::tilde(&index)
+    let path = omafind_core::paths::index_path();
+    checks.push(Check::new(
+        path.exists(),
+        "index",
+        if path.exists() {
+            tilde(&path)
         } else {
             "none yet".into()
         },
-    });
-
+    ));
     let running = omafind_client::Client::is_running();
-    let status = if running {
-        omafind_client::Client::connect()
-            .and_then(|mut c| c.status())
-            .ok()
-    } else {
-        None
-    };
-    checks.push(Check {
-        ok: running,
-        what: "omafindd".into(),
-        detail: match &status {
+    let status = running
+        .then(|| {
+            omafind_client::Client::connect()
+                .and_then(|mut c| c.status())
+                .ok()
+        })
+        .flatten();
+    checks.push(Check::new(
+        running,
+        "omafindd",
+        match &status {
             Some(s) => format!(
                 "{} · {} indexed, {} pending, {} failed",
                 s.state, s.indexed, s.pending, s.failed
@@ -164,82 +192,133 @@ pub fn run(json: bool) -> Result<bool> {
             None if running => "answers, but not with a status".into(),
             None => "not running: systemctl --user enable --now omafindd".into(),
         },
-    });
-    let unit_enabled = omafind_setup::daemon_enabled();
-    checks.push(Check {
-        ok: unit_enabled,
-        what: "omafindd at login".into(),
-        detail: if unit_enabled {
-            "enabled".into()
+    ));
+    let enabled = omafind_setup::daemon_enabled();
+    checks.push(Check::new(
+        enabled,
+        "omafindd at login",
+        if enabled {
+            "enabled"
         } else {
-            "not enabled: run `omafind setup`".into()
+            "not enabled: run `omafind setup`"
         },
-    });
+    ));
+    checks
+}
 
-    let window = Command::new("hyprctl")
+fn window() -> Vec<Check> {
+    let mut checks = Vec::new();
+    let resident = Command::new("hyprctl")
         .args(["-j", "clients"])
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).contains("\"class\": \"omafind\""))
         .unwrap_or(false);
-    checks.push(Check {
-        ok: window,
-        what: "omafind-app window".into(),
-        detail: if window {
-            "resident".into()
+    checks.push(Check::new(
+        resident,
+        "omafind-app",
+        if resident {
+            "resident"
         } else {
-            "not running: `omafind toggle` starts it".into()
+            "not running: `omafind toggle` starts it"
         },
-    });
+    ));
     let parts = hypr::installed();
     for (ok, what) in [
         (parts.binding, "SUPER + CTRL + G keybinding"),
-        (
-            parts.rules,
-            "window rules (special:omafind, floating, centred)",
-        ),
+        (parts.rules, "window rules"),
         (parts.autostart, "omafind-app at login"),
     ] {
-        checks.push(Check {
+        checks.push(Check::new(
             ok,
-            what: format!("hypr/omafind.lua: {what}"),
-            detail: if ok {
-                "present".into()
+            what,
+            if ok {
+                "in ~/.config/hypr/omafind.lua"
             } else {
-                "missing: run `omafind setup`".into()
+                "missing: run `omafind setup`"
             },
-        });
+        ));
     }
+    checks
+}
 
-    let all_ok = checks.iter().all(|c| c.ok);
+type Group = (&'static str, &'static str, fn() -> Vec<Check>);
+
+const GROUPS: [Group; 5] = [
+    ("Model", "Looking for the model files", models),
+    ("Engine", "Loading the engine and probing for a GPU", engine),
+    (
+        "Tools",
+        "Looking for the programs Omafind reads and opens files with",
+        tools,
+    ),
+    ("Indexing", "Asking the daemon how indexing goes", index),
+    (
+        "Window",
+        "Checking the window and the Hyprland config",
+        window,
+    ),
+];
+
+pub fn run(json: bool) -> Result<bool> {
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(
-                &checks
-                    .iter()
-                    .map(|c| serde_json::json!({"ok": c.ok, "what": c.what, "detail": c.detail}))
-                    .collect::<Vec<_>>()
-            )?
-        );
-    } else {
-        cliclack::intro("Omafind doctor")?;
-        for c in &checks {
-            let line = format!("{}\n{}", c.what, c.detail);
-            if c.ok {
-                cliclack::log::success(line)?;
-            } else {
-                cliclack::log::error(line)?;
-            }
-        }
-        if all_ok {
-            cliclack::outro("Everything looks fine")?;
-        } else {
-            let failed = checks.iter().filter(|c| !c.ok).count();
-            cliclack::outro_cancel(format!(
-                "{failed} {} need attention",
-                if failed == 1 { "check" } else { "checks" }
-            ))?;
-        }
+        let checks: Vec<Check> = GROUPS.iter().flat_map(|(_, _, run)| run()).collect();
+        let all_ok = checks.iter().all(|c| c.ok);
+        let rows: Vec<_> = checks
+            .iter()
+            .map(|c| serde_json::json!({"ok": c.ok, "what": c.what, "detail": c.detail}))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(all_ok);
     }
-    Ok(all_ok)
+    ui::intro(
+        "doctor",
+        "checks the model, engine, tools, daemon and window",
+    )?;
+    let mut failed = 0;
+    for (title, doing, run) in GROUPS {
+        let checks = ui::step(doing, 350, run, |checks| {
+            let ok = checks.iter().filter(|c| c.ok).count();
+            let tally = format!("{ok}/{}", checks.len());
+            let tally = if ok == checks.len() {
+                console::style(tally).green().to_string()
+            } else {
+                console::style(tally).yellow().to_string()
+            };
+            format!("{}  {tally}", ui::bold(title))
+        });
+        let width = checks
+            .iter()
+            .map(|c| c.what.chars().count())
+            .max()
+            .unwrap_or(0);
+        for c in &checks {
+            let mark = if c.optional_missing {
+                console::style("○").yellow().to_string()
+            } else {
+                ui::mark(c.ok)
+            };
+            ui::line(format!(
+                "{} {:<width$}  {}",
+                mark,
+                c.what,
+                ui::dim(&c.detail)
+            ));
+            ui::beat(30);
+        }
+        ui::line("");
+        failed += checks.iter().filter(|c| !c.ok).count();
+    }
+    if failed == 0 {
+        cliclack::outro("Everything looks fine")?;
+    } else {
+        cliclack::outro_cancel(format!(
+            "{failed} {} attention",
+            if failed == 1 {
+                "check needs"
+            } else {
+                "checks need"
+            }
+        ))?;
+    }
+    Ok(failed == 0)
 }

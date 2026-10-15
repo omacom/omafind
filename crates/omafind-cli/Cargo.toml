@@ -21,3 +21,4 @@ serde_json.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 serde.workspace = true
 cliclack = "0.5.6"
+console = "0.16"

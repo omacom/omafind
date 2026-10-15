@@ -241,7 +241,10 @@ pub fn run(options: Options) -> Result<()> {
 
 /// `omafind uninstall`: stops the daemon, removes the config lines, and (asked) the data.
 pub fn uninstall(yes: bool, keep_data: bool) -> Result<()> {
-    cliclack::intro("Omafind uninstall")?;
+    ui::intro(
+        "uninstall",
+        "the daemon, the window's Hyprland lines and, if you say so, the data",
+    )?;
     let _ = Command::new("systemctl")
         .args(["--user", "disable", "--now", "omafindd"])
         .output();

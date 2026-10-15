@@ -119,6 +119,7 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    ui::init();
     let cli = Cli::parse();
     let index_path = cli
         .index
@@ -138,13 +139,15 @@ fn main() -> Result<()> {
         } => search(&index_path, &query.join(" "), json, &kind, limit, cli.cpu),
         Command::Status { failed: true, .. } => failed_files(&index_path),
         Command::Status { json, .. } => status(&index_path, json),
-        Command::Pause => Client::connect()?
-            .simple(&Request::Pause)
-            .map(|_| println!("paused")),
-        Command::Resume => Client::connect()?
-            .simple(&Request::Resume)
-            .map(|_| println!("resumed")),
-        Command::Watch => watch(),
+        Command::Pause => {
+            Client::connect()?.simple(&Request::Pause)?;
+            done("Indexing paused; `omafind resume` picks it up where it stopped")
+        }
+        Command::Resume => {
+            Client::connect()?.simple(&Request::Resume)?;
+            done("Indexing resumed")
+        }
+        Command::Watch => watch(true),
         Command::Toggle => toggle(),
         Command::Setup {
             yes,
@@ -257,7 +260,8 @@ fn toggle() -> Result<()> {
 }
 
 /// Prints the daemon's progress until nothing is pending and no worker runs.
-fn watch() -> Result<()> {
+/// Follows the daemon until indexing is done. `intro`: open the frame (false when `index` already did).
+fn watch(intro: bool) -> Result<()> {
     let client = Client::connect()?;
     if !std::io::stderr().is_terminal() {
         let mut busy_seen = false;
@@ -297,33 +301,66 @@ fn watch() -> Result<()> {
         });
     }
     // On a terminal: one bar over every file, the one being read as its message.
-    let bar = cliclack::progress_bar(1);
-    let mut started = false;
+    if intro {
+        ui::intro(
+            "watch",
+            "Ctrl+C stops watching · `omafind pause` stops indexing",
+        )?;
+    }
+    // Before files are read there is a phase to explain (starting, crawling, loading the model, paused): a spinner
+    // says which. Once files are being read, a bar takes over.
+    let waiting = cliclack::spinner();
+    waiting.start("Asking omafindd what it is doing");
+    let mut bar: Option<cliclack::ProgressBar> = None;
+    let mut summary = String::new();
     let mut busy_seen = false;
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     client.subscribe(|event| {
         match event {
             omafind_client::Event::Status(s) => {
-                let done = (s.indexed + s.failed) as u64;
-                bar.set_length((s.files as u64).max(1));
-                bar.set_position(done);
-                let message = match s.current.as_deref() {
-                    Some(c) => format!(
-                        "{} · {}",
-                        s.state,
-                        omafind_core::paths::tilde(std::path::Path::new(c))
-                    ),
-                    None => s.state.clone(),
-                };
-                if !started {
-                    bar.start(&message);
-                    started = true;
-                } else {
-                    bar.set_message(&message);
-                }
+                let current = s
+                    .current
+                    .as_deref()
+                    .map(|c| omafind_core::paths::tilde(std::path::Path::new(c)));
+                let phase = phase(&s);
                 if finished(&s, &mut busy_seen) {
-                    bar.stop(format!("{} files indexed, {} failed", s.indexed, s.failed));
+                    let line = format!(
+                        "{} files indexed, {} failed",
+                        thousands(s.indexed),
+                        thousands(s.failed)
+                    );
+                    match bar.take() {
+                        Some(bar) => {
+                            bar.set_position((s.indexed + s.failed) as u64);
+                            bar.stop(line);
+                        }
+                        None => waiting.stop(format!("Nothing new to index · {line}")),
+                    }
+                    summary = if s.failed == 0 {
+                        "Everything is indexed".to_owned()
+                    } else {
+                        format!("Indexed, with {} files that couldn't be read", s.failed)
+                    };
                     return false;
+                }
+                match (&bar, &current) {
+                    // Files are being read: from now on, the bar.
+                    (None, Some(_)) if s.state == "indexing" => {
+                        waiting.stop(format!("{} files to index", thousands(s.pending)));
+                        let b = cliclack::progress_bar((s.files as u64).max(1));
+                        b.start(current.clone().unwrap_or_default());
+                        b.set_position((s.indexed + s.failed) as u64);
+                        bar = Some(b);
+                    }
+                    (None, _) => waiting.set_message(phase),
+                    (Some(b), _) => {
+                        b.set_length((s.files as u64).max(1));
+                        b.set_position((s.indexed + s.failed) as u64);
+                        b.set_message(match (&current, s.state.as_str()) {
+                            (Some(c), "indexing") => c.clone(),
+                            _ => phase,
+                        });
+                    }
                 }
             }
             omafind_client::Event::Indexed { .. } => {}
@@ -331,15 +368,43 @@ fn watch() -> Result<()> {
         }
         true
     })?;
-    report_failures(&failures)
+    report_failures(&failures)?;
+    if summary.is_empty() {
+        cliclack::outro_cancel("omafindd went away")?;
+    } else {
+        cliclack::outro(summary)?;
+    }
+    Ok(())
 }
 
-/// Indexing is over: the daemon is idle with nothing pending, after it has been seen busy (or has files to show for
-/// it). A daemon that has only just started is idle before its first crawl.
+/// What the daemon is doing before (or between) files, in words.
+fn phase(s: &omafind_client::Status) -> String {
+    match s.state.as_str() {
+        "starting" => "omafindd is starting: setting up a watch on every folder".into(),
+        "crawling" => "Looking for new and changed files".into(),
+        "paused" => "Paused · `omafind resume` goes on".into(),
+        "paused_power_saver" => "Paused while the power profile is power-saver".into(),
+        "waiting_for_ac" => "Waiting for a charger".into(),
+        "indexing" if s.current.is_none() => "Loading the model".into(),
+        "indexing" => "Reading files".into(),
+        _ if s.pending > 0 => format!(
+            "{} files to index, waiting for the indexer to start",
+            thousands(s.pending)
+        ),
+        _ => "Waiting for omafindd".into(),
+    }
+}
+
+/// Indexing is over: nothing pending and no crawl under way, after the daemon has been seen busy (or has files to
+/// show for it, or no folders to index). A daemon that has only just started is idle before its first crawl; the
+/// worker staying loaded for a minute after the last file doesn't count as work.
 fn finished(s: &omafind_client::Status, busy_seen: &mut bool) -> bool {
-    if s.state != "idle" || s.pending > 0 || s.worker_running {
+    if s.pending > 0 || s.state == "crawling" || s.state == "starting" {
         *busy_seen = true;
         return false;
+    }
+    if s.state == "indexing" {
+        *busy_seen = true;
     }
     *busy_seen || s.indexed + s.failed > 0 || s.roots.is_empty()
 }
@@ -422,10 +487,17 @@ fn index(
                     .collect(),
             })?;
         }
-        eprintln!(
-            "omafindd is indexing; following its progress (Ctrl-C to stop watching, it keeps going)"
-        );
-        return watch();
+        if std::io::stderr().is_terminal() {
+            ui::intro("index", folders_line(&roots))?;
+            cliclack::log::info(
+                "omafindd is indexing. Ctrl+C stops watching; `omafind pause` stops the indexing, `omafind resume` goes on",
+            )?;
+        } else {
+            eprintln!(
+                "omafindd is indexing; following its progress (Ctrl-C to stop watching, it keeps going)"
+            );
+        }
+        return watch(false);
     }
     let mut store = Store::open(index_path)?;
     let mut code_store = Store::open(&index_path.with_file_name("code.sqlite"))?;
@@ -437,12 +509,15 @@ fn index(
         !roots.is_empty(),
         "nothing to index: `omafind index ~/Pictures ~/Documents` picks the folders"
     );
+    if std::io::stderr().is_terminal() {
+        ui::intro("index", folders_line(&roots))?;
+    }
     for s in [&store, &code_store] {
         if reset || s.vector_version()? != omafind_core::model::VECTOR_VERSION {
-            eprintln!(
-                "embedding everything again (vectors {})",
+            cliclack::log::warning(format!(
+                "Embedding everything again (vectors {})",
                 omafind_core::model::VECTOR_VERSION
-            );
+            ))?;
             s.reset_all()?;
             s.set_meta(
                 "vector_version",
@@ -451,17 +526,24 @@ fn index(
         }
     }
     let started = Instant::now();
-    let mut embedder = load_embedder(false, cpu)?;
+    let mut embedder = ui::step(
+        "Loading the model",
+        0,
+        || load_embedder(false, cpu),
+        |loaded| match loaded {
+            Ok(e) => format!(
+                "Model loaded in {:.1} s on the {}",
+                e.load_seconds,
+                if omafind_embed::gpu_found() && !cpu {
+                    "GPU"
+                } else {
+                    "CPU"
+                }
+            ),
+            Err(_) => "The model didn't load".into(),
+        },
+    )?;
     store.set_meta("llama_version", omafind_embed::LLAMA_VERSION)?;
-    eprintln!(
-        "model loaded in {:.1} s ({})",
-        embedder.load_seconds,
-        if omafind_embed::gpu_found() && !cpu {
-            "GPU"
-        } else {
-            "CPU"
-        }
-    );
     // One bar per run over the files the crawl found pending; what the crawl found, and failures, around it.
     let bar = std::cell::RefCell::new(None::<cliclack::ProgressBar>);
     let pending = std::cell::Cell::new(0u64);
@@ -554,7 +636,29 @@ fn index(
         }
         .run(&code)?;
     }
-    eprintln!("done in {:.1} s", started.elapsed().as_secs_f64());
+    cliclack::outro(format!("Done in {:.1} s", started.elapsed().as_secs_f64()))?;
+    Ok(())
+}
+
+/// `~/Pictures, ~/Documents`, or what indexing with no folders means.
+fn folders_line(roots: &[Root]) -> String {
+    if roots.is_empty() {
+        return "the remembered folders".into();
+    }
+    roots
+        .iter()
+        .map(|r| omafind_core::paths::tilde(&r.path))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A one-line result: framed on a terminal, a plain line otherwise.
+fn done(message: &str) -> Result<()> {
+    if ui::framed() {
+        cliclack::log::success(message)?;
+    } else {
+        println!("{message}");
+    }
     Ok(())
 }
 
@@ -590,38 +694,100 @@ fn search(
         .iter()
         .map(|k| FileKind::parse(k).with_context(|| format!("unknown kind {k}")))
         .collect::<Result<_>>()?;
-    let (hits, loaded, searched) = if Client::is_running() {
-        let t = Instant::now();
-        let (hits, took_ms) = Client::connect()?.search(query, limit, kinds)?;
-        (
-            hits,
-            Duration::ZERO,
-            Duration::from_secs_f64((took_ms / 1000.0).max(0.0)).min(t.elapsed()),
-        )
-    } else {
-        anyhow::ensure!(
-            index_path.exists(),
-            "no index yet: run `omafind index <folders>` first"
-        );
-        let t0 = Instant::now();
-        let mut embedder = load_embedder(true, cpu)?;
-        let loaded = t0.elapsed();
-        let t1 = Instant::now();
-        let (text, options, _) = omafind_index::plan(query, &kinds, limit);
-        let store = Store::open(&if options.code {
-            index_path.with_file_name("code.sqlite")
+    let framed = ui::framed() && !json;
+    if framed {
+        ui::intro("search", query)?;
+    }
+    let work = || -> Result<(Vec<omafind_core::Hit>, Duration, Duration)> {
+        Ok(if Client::is_running() {
+            let t = Instant::now();
+            let (hits, took_ms) = Client::connect()?.search(query, limit, kinds)?;
+            (
+                hits,
+                Duration::ZERO,
+                Duration::from_secs_f64((took_ms / 1000.0).max(0.0)).min(t.elapsed()),
+            )
         } else {
-            index_path.to_path_buf()
-        })?;
-        let hits = if text.is_empty() && options.filter.is_empty() {
-            Vec::new()
-        } else if text.is_empty() {
-            omafind_index::rank(&store, None, &text, &options)?.hits
-        } else {
-            omafind_index::search(&store, &mut embedder, &text, &options)?
-        };
-        (hits, loaded, t1.elapsed())
+            anyhow::ensure!(
+                index_path.exists(),
+                "no index yet: run `omafind index <folders>` first"
+            );
+            let t0 = Instant::now();
+            let mut embedder = load_embedder(true, cpu)?;
+            let loaded = t0.elapsed();
+            let t1 = Instant::now();
+            let (text, options, _) = omafind_index::plan(query, &kinds, limit);
+            let store = Store::open(&if options.code {
+                index_path.with_file_name("code.sqlite")
+            } else {
+                index_path.to_path_buf()
+            })?;
+            let hits = if text.is_empty() && options.filter.is_empty() {
+                Vec::new()
+            } else if text.is_empty() {
+                omafind_index::rank(&store, None, &text, &options)?.hits
+            } else {
+                omafind_index::search(&store, &mut embedder, &text, &options)?
+            };
+            (hits, loaded, t1.elapsed())
+        })
     };
+    let (hits, loaded, searched) = if framed {
+        ui::step("Searching", 0, work, |r| match r {
+            Ok((hits, loaded, searched)) if loaded.is_zero() => {
+                format!(
+                    "{} found in {:.0} ms",
+                    count(hits.len(), "result"),
+                    searched.as_secs_f64() * 1000.0
+                )
+            }
+            Ok((hits, loaded, searched)) => format!(
+                "{} found in {:.0} ms (the model took {:.1} s to load: omafindd keeps it ready)",
+                count(hits.len(), "result"),
+                searched.as_secs_f64() * 1000.0,
+                loaded.as_secs_f64()
+            ),
+            Err(_) => "Search failed".into(),
+        })?
+    } else {
+        work()?
+    };
+    if framed {
+        for (i, hit) in hits.iter().enumerate() {
+            let mut meta = vec![hit.kind.as_str().to_owned()];
+            if !hit.locator_label.is_empty() {
+                meta.push(hit.locator_label.clone());
+            }
+            if let Some(sim) = hit.similarity {
+                meta.push(format!("{sim:.2}"));
+            }
+            ui::line(format!(
+                "{} {}  {}",
+                ui::dim(format!("{:>2}", i + 1)),
+                ui::bold(&hit.name),
+                ui::dim(meta.join(" · "))
+            ));
+            ui::line(format!(
+                "   {}",
+                ui::dim(omafind_core::paths::tilde(std::path::Path::new(&hit.path)))
+            ));
+            if !hit.snippet.is_empty() {
+                let room = console::Term::stderr().size().1 as usize;
+                let snippet = fit(&hit.snippet, room.saturating_sub(8).max(40));
+                ui::line(format!("   {}", highlight(&snippet, &hit.matched_words)));
+            }
+            ui::line("");
+            ui::beat(15);
+        }
+        if hits.is_empty() {
+            cliclack::outro_cancel(format!(
+                "Nothing found for {query:?}: try other words, or fewer filters"
+            ))?;
+        } else {
+            cliclack::outro("Open one with `omafind toggle`, or by its path")?;
+        }
+        return Ok(());
+    }
     if json {
         println!("{}", serde_json::to_string_pretty(&hits)?);
         return Ok(());
@@ -670,12 +836,203 @@ fn search(
     Ok(())
 }
 
+/// `text` cut to `width` characters, an ellipsis marking the cut.
+fn fit(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_owned();
+    }
+    let cut: String = text.chars().take(width.saturating_sub(1)).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// `3 results`, `1 result`.
+fn count(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+/// `text` with the query's words in the accent colour, as the window marks them.
+fn highlight(text: &str, words: &[String]) -> String {
+    let lower = text.to_lowercase();
+    // Offsets into the lowercase copy only line up with the text when lowercasing kept every byte length.
+    if lower.len() != text.len() {
+        return text.to_owned();
+    }
+    let mut out = String::new();
+    let mut at = 0;
+    while at < text.len() {
+        let next = words
+            .iter()
+            .filter(|w| w.len() >= 2)
+            .filter_map(|w| lower[at..].find(w.as_str()).map(|i| (at + i, w.len())))
+            .min_by_key(|&(i, len)| (i, std::cmp::Reverse(len)));
+        match next {
+            Some((i, len)) if text.is_char_boundary(i) && text.is_char_boundary(i + len) => {
+                out.push_str(&text[at..i]);
+                out.push_str(&console::style(&text[i..i + len]).blue().bold().to_string());
+                at = i + len;
+            }
+            _ => {
+                out.push_str(&text[at..]);
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// `19,431`
+fn thousands(n: i64) -> String {
+    let digits = n.abs().to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    if n < 0 { format!("-{out}") } else { out }
+}
+
+fn kind_label(kind: FileKind) -> &'static str {
+    match kind {
+        FileKind::Screenshot => "Screenshots",
+        FileKind::Image => "Photos",
+        FileKind::Pdf => "PDFs",
+        FileKind::Doc => "Documents",
+        FileKind::Audio => "Recordings",
+        FileKind::Video => "Videos",
+        FileKind::Code => "Code",
+    }
+}
+
+/// `■■■■■■□□□□` over `width` cells.
+fn meter(done: i64, total: i64, width: usize) -> String {
+    let filled = if total > 0 {
+        ((done as f64 / total as f64) * width as f64).round() as usize
+    } else {
+        0
+    };
+    let filled = filled.min(width);
+    format!(
+        "{}{}",
+        console::style("■".repeat(filled)).blue(),
+        console::style("□".repeat(width - filled)).dim()
+    )
+}
+
+fn status_framed(s: &omafind_client::Status) -> Result<()> {
+    ui::intro("status", format!("omafindd {}", s.version))?;
+    let current = s
+        .current
+        .as_deref()
+        .map(|c| omafind_core::paths::tilde(std::path::Path::new(c)));
+    match s.state.as_str() {
+        "indexing" => cliclack::log::info(format!(
+            "Indexing · `omafind pause` stops it{}",
+            current
+                .map(|c| format!("\n{}", ui::dim(c)))
+                .unwrap_or_default()
+        ))?,
+        "crawling" => cliclack::log::info("Looking for new and changed files")?,
+        "starting" => cliclack::log::info("Starting: setting up a watch on every folder")?,
+        "paused" => cliclack::log::warning("Paused: `omafind resume` goes on")?,
+        "paused_power_saver" => {
+            cliclack::log::warning("Paused while the power profile is power-saver")?
+        }
+        "waiting_for_ac" => cliclack::log::warning("Waiting for a charger")?,
+        _ => cliclack::log::success("Up to date, watching for changes")?,
+    }
+    ui::line(ui::bold("Folders"));
+    for root in &s.roots {
+        ui::line(format!(
+            "  {}{}",
+            omafind_core::paths::tilde(&root.path),
+            if root.code {
+                ui::dim("  (code, searched with code:)")
+            } else {
+                String::new()
+            }
+        ));
+    }
+    ui::line("");
+    if !s.kinds.is_empty() {
+        ui::line(ui::bold("Files"));
+        let width = s
+            .kinds
+            .iter()
+            .map(|(_, _, t)| thousands(*t).len())
+            .max()
+            .unwrap_or(1);
+        for (kind, done, total) in &s.kinds {
+            ui::line(format!(
+                "  {:<12} {}  {:>width$} / {:<width$}",
+                kind_label(*kind),
+                meter(*done, *total, 24),
+                thousands(*done),
+                thousands(*total),
+            ));
+        }
+        ui::line("");
+    }
+    ui::line(ui::dim(format!(
+        "llama.cpp {} · {} · query encoder {} · {}",
+        s.llama_version,
+        if s.on_battery { "on battery" } else { "on AC" },
+        if s.query_encoder_loaded {
+            "loaded"
+        } else {
+            "unloaded"
+        },
+        if s.vectors_in_memory > 0 {
+            format!(
+                "{} vectors in memory ({} MB)",
+                thousands(s.vectors_in_memory as i64),
+                s.vectors_bytes >> 20
+            )
+        } else {
+            "vectors not in memory".into()
+        }
+    )));
+    ui::line("");
+    let eta = s
+        .eta_seconds
+        .map(|e| format!(" · about {} left", minutes(e)))
+        .unwrap_or_default();
+    let failed = if s.failed > 0 {
+        format!(
+            " · {} couldn't be read (`omafind status --failed`)",
+            thousands(s.failed)
+        )
+    } else {
+        String::new()
+    };
+    cliclack::outro(format!(
+        "{} of {} files indexed{eta}{failed}",
+        thousands(s.indexed),
+        thousands(s.files)
+    ))?;
+    Ok(())
+}
+
+/// `1 h 50 min`, `12 min`, `under a minute`.
+fn minutes(seconds: f64) -> String {
+    let m = (seconds / 60.0).round() as u64;
+    match m {
+        0 => "under a minute".into(),
+        1..=59 => format!("{m} min"),
+        _ => format!("{} h {} min", m / 60, m % 60),
+    }
+}
+
 fn status(index_path: &std::path::Path, json: bool) -> Result<()> {
     if Client::is_running() {
         let status = Client::connect()?.status()?;
         if json {
             println!("{}", serde_json::to_string_pretty(&status)?);
             return Ok(());
+        }
+        if ui::framed() {
+            return status_framed(&status);
         }
         println!(
             "omafindd {}: {}{}",

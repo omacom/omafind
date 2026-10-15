@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -40,8 +40,9 @@ pub struct Searcher {
     /// Embedded queries, newest last.
     cache: Mutex<VecDeque<(String, Vec<f32>)>>,
     tickets: AtomicU64,
+    vector_count: AtomicUsize,
+    vector_bytes: AtomicUsize,
     latest: Mutex<HashMap<String, u64>>,
-    pub index_path: PathBuf,
     cpu: bool,
     unload_after: Duration,
 }
@@ -80,8 +81,9 @@ impl Searcher {
             quick: Mutex::new((Store::open(&index_path)?, Store::open(&code_index_path)?)),
             cache: Mutex::new(VecDeque::new()),
             tickets: AtomicU64::new(0),
+            vector_count: AtomicUsize::new(0),
+            vector_bytes: AtomicUsize::new(0),
             latest: Mutex::new(HashMap::new()),
-            index_path,
             cpu,
             unload_after: Duration::from_secs(unload_after_minutes.max(1) * 60),
         });
@@ -103,11 +105,13 @@ impl Searcher {
     }
 
     /// Vectors held in memory and their size in bytes.
+    /// Vectors held in memory and their bytes, as of the last load. Never waits: a status must answer while a
+    /// load or a search holds the stores.
     pub fn vectors_loaded(&self) -> (usize, usize) {
-        match &self.full.lock().unwrap().vectors {
-            Some((a, b)) => (a.len() + b.len(), a.bytes() + b.bytes()),
-            None => (0, 0),
-        }
+        (
+            self.vector_count.load(Ordering::Relaxed),
+            self.vector_bytes.load(Ordering::Relaxed),
+        )
     }
 
     /// Loads the encoder and the matrices if they aren't loaded.
@@ -145,6 +149,10 @@ impl Searcher {
                 t.elapsed().as_secs_f64(),
                 (main.bytes() + code.bytes()) >> 20
             );
+            self.vector_count
+                .store(main.len() + code.len(), Ordering::Relaxed);
+            self.vector_bytes
+                .store(main.bytes() + code.bytes(), Ordering::Relaxed);
             stores.vectors = Some((main, code));
         }
         Ok(())
@@ -293,6 +301,12 @@ impl Searcher {
         })
     }
 
+    /// Runs `f` with the long-lived read connections (main index, code index), for status requests.
+    pub fn with_stores<T>(&self, f: impl FnOnce(&Store, &Store) -> T) -> T {
+        let stores = self.quick.lock().unwrap();
+        f(&stores.0, &stores.1)
+    }
+
     pub fn opened(&self, path: &std::path::Path) -> Result<()> {
         let stores = self.quick.lock().unwrap();
         stores.0.record_open(path)?;
@@ -346,6 +360,8 @@ impl Searcher {
                         inner.embedder = None;
                         inner.idle_since = None;
                         self.full.lock().unwrap().vectors = None;
+                        self.vector_count.store(0, Ordering::Relaxed);
+                        self.vector_bytes.store(0, Ordering::Relaxed);
                         self.cache.lock().unwrap().clear();
                         crate::log!("query encoder and vectors unloaded (idle)");
                     } else {

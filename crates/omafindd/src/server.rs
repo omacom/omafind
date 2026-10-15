@@ -2,23 +2,16 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::{Sender, channel};
 
 use anyhow::{Context, Result, bail};
 use omafind_client::{Event, Request, Response};
-use omafind_store::Store;
 
 use crate::daemon::{Msg, Shared, status};
 use crate::searcher::{Query, Searcher};
 
-pub fn start(
-    shared: Arc<Shared>,
-    searcher: Arc<Searcher>,
-    tx: Sender<Msg>,
-    index_path: PathBuf,
-) -> Result<()> {
+pub fn start(shared: Arc<Shared>, searcher: Arc<Searcher>, tx: Sender<Msg>) -> Result<()> {
     let path = omafind_client::socket_path();
     if UnixStream::connect(&path).is_ok() {
         bail!(
@@ -37,9 +30,8 @@ pub fn start(
                 let shared = shared.clone();
                 let searcher = searcher.clone();
                 let tx = tx.clone();
-                let index_path = index_path.clone();
                 std::thread::spawn(move || {
-                    if let Err(error) = serve(stream, shared, searcher, tx, index_path) {
+                    if let Err(error) = serve(stream, shared, searcher, tx) {
                         crate::log!("connection: {error:#}");
                     }
                 });
@@ -53,7 +45,6 @@ fn serve(
     shared: Arc<Shared>,
     searcher: Arc<Searcher>,
     tx: Sender<Msg>,
-    index_path: PathBuf,
 ) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut writer = stream;
@@ -80,8 +71,9 @@ fn serve(
                 let (event_tx, event_rx) = channel::<Event>();
                 shared.subscribers.lock().unwrap().push(event_tx);
                 // The current state first, so a new subscriber never starts blank.
-                let store = Store::open(&index_path)?;
-                let first = Event::Status(status(&shared, &store, &searcher)?);
+                let first = Event::Status(
+                    searcher.with_stores(|main, code| status(&shared, main, code, &searcher))?,
+                );
                 send_event(&mut writer, &first)?;
                 for event in event_rx {
                     if send_event(&mut writer, &event).is_err() {
@@ -91,12 +83,11 @@ fn serve(
                 return Ok(());
             }
             other => {
-                let response =
-                    handle(other, &shared, &searcher, &tx, &index_path).unwrap_or_else(|error| {
-                        Response::Error {
-                            message: format!("{error:#}"),
-                        }
-                    });
+                let response = handle(other, &shared, &searcher, &tx).unwrap_or_else(|error| {
+                    Response::Error {
+                        message: format!("{error:#}"),
+                    }
+                });
                 reply(&mut writer, &response)?;
             }
         }
@@ -108,7 +99,6 @@ fn handle(
     shared: &Shared,
     searcher: &Searcher,
     tx: &Sender<Msg>,
-    index_path: &Path,
 ) -> Result<Response> {
     Ok(match request {
         Request::Search {
@@ -138,10 +128,9 @@ fn handle(
         }
         Request::Recents => Response::Recents(searcher.recents()?),
         Request::Context { chunk_id, code } => Response::Passage(searcher.context(chunk_id, code)?),
-        Request::Status => {
-            let store = Store::open(index_path)?;
-            Response::Status(status(shared, &store, searcher)?)
-        }
+        Request::Status => Response::Status(
+            searcher.with_stores(|main, code| status(shared, main, code, searcher))?,
+        ),
         Request::Pause => {
             tx.send(Msg::Pause)?;
             Response::Ok
