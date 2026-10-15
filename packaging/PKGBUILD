@@ -48,7 +48,7 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/release/dig target/release/digd target/release/dig-app -t "$pkgdir/usr/bin/"
-  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js -t "$pkgdir/usr/share/dig/ui/"
+  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js -t "$pkgdir/usr/share/dig/ui/"
   install -Dm644 packaging/dig.lua -t "$pkgdir/usr/share/dig/hypr/"
   install -Dm644 systemd/digd.service -t "$pkgdir/usr/lib/systemd/user/"
   install -Dm644 packaging/dig.desktop -t "$pkgdir/usr/share/applications/"

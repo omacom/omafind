@@ -182,7 +182,7 @@ export class Setup {
       } else if (r.kind === "apply") {
         const selected = index === this.cursor;
         items.push(
-          h_flex().w_full().pt(16).px(12).child(
+          h_flex().w_full().pt(16).pb(12).px(12).child(
             div()
               .id("apply")
               .px(18)
@@ -209,6 +209,7 @@ export class Setup {
       .min_h_0()
       .px(8)
       .py(6)
+      .overflow_hidden()
       .scrollable(true)
       .child(
         v_flex().px(12).pt(10).pb(2).gap(4)

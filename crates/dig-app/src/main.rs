@@ -390,14 +390,16 @@ fn hide_window() {
     });
 }
 
-/// Where the UI scripts are: `--ui DIR`, else `/usr/share/dig/ui` when installed, else the repo's `ui/`.
+/// Where the UI scripts are: `--ui DIR`, else `~/.local/share/dig/ui` (install.sh), else `/usr/share/dig/ui` (the
+/// package), else the checkout's `ui/` (development).
 fn ui_root(explicit: Option<PathBuf>) -> PathBuf {
     if let Some(dir) = explicit {
         return dir;
     }
-    let installed = PathBuf::from("/usr/share/dig/ui");
-    if installed.join("main.js").exists() {
-        return installed;
+    for candidate in [dig_core::paths::data_dir().join("ui"), PathBuf::from("/usr/share/dig/ui")] {
+        if candidate.join("main.js").exists() {
+            return candidate;
+        }
     }
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../ui").canonicalize().unwrap_or_else(|_| PathBuf::from("ui"))
 }
