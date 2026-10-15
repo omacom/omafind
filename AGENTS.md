@@ -30,7 +30,8 @@ whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine ta
 Notes with numbers: `docs/phase-0.md`.
 
 Phase 7 (search speed) and most of 8–9, 2026-10-15: vectors moved out of sqlite-vec into an in-memory int8 matrix
-with a float32 rescore (`omafind-store/src/vectors.rs`), schema 2 (migrates schema 1 in place, nothing re-embeds), a
+with a float32 rescore (`omafind-store/src/vectors.rs`), schema 3 (int8 rows in `vectors`, float32 apart in
+`vectors_full`; schemas 1 and 2 convert in place, nothing re-embeds), a
 trigram FTS5 index on file names, a keyword-only quick stage, per-session supersede and a query-vector cache in
 `omafindd`, recency-first indexing, square thumbnails made while indexing (`omafind-extract/src/thumbs.rs`), EXIF capture
 dates (`omafind-extract/src/exif.rs`), inline filters (`omafind-core/src/query.rs`: `in:`, `type:`, `after:`, `before:`,
@@ -48,7 +49,7 @@ now), a `omafind-bin` AUR package from CI releases, the long-file second pass (b
 ```
 crates/omafind-core      prompts, model pins, VECTOR_VERSION; later schema + ranking
 crates/omafind-embed     bindgen over the engine's llama.h/mtmd.h, image sizing, Embedder, `embed-spike` binary
-crates/omafind-store     SQLite index: files, chunks, vectors (int8 + f32 blobs, change log), external-content FTS5 over
+crates/omafind-store     SQLite index: files, chunks, vectors (int8; f32 in vectors_full; change log), external-content FTS5 over
                      chunks, trigram FTS5 over file names, roots, meta, searches/opens history; vectors.rs is the
                      in-memory matrix (VectorIndex)
 crates/omafind-extract   classify by extension; readers → chunks: name, image, passages, pdf pages (+ rendered scans),
@@ -156,6 +157,12 @@ before the rewrite). `omafind bench` at 300k synthetic chunks: quick stage 16 ms
   system had (the AUR `llama.cpp-vulkan-git`, a different tag). Now omafind-embed publishes the path as `links`
   metadata and omafindd, omafind-cli and omafind-app bake it in from `DEP_LLAMA_RPATH` in their own build.rs. Check
   with `ldd target/release/omafindd | grep llama`; build.rs warns when it falls back to a system llama.cpp.
+- **This machine's `/` is a spinning disk** (LUKS + btrfs, zstd), so a cold page cache shows what layout costs.
+  With the float32 copy in the same row as the int8 one (schema 2) every row took a page and loading the matrix read
+  the whole table: 5.6 s per 100k rows cold, 0.14 s warm. Split (schema 3): 0.4 s cold. The floats are then read
+  once in the background (`Searcher::prefetch`, 2.2 s per 100k cold), else each early search pays ~1.5 s of
+  scattered reads to rescore. Measure cold with `posix_fadvise(DONTNEED)` on the file after a `sync`, never in the
+  scratchpad (tmpfs).
 - The bundled SQLite has no math functions (`pow` fails at prepare time).
 - Every lookup a search makes per result needs an index: `vectors(file_id)` missing made the photo filter 70× slower
   at 300k chunks. Run `omafind bench` after any change to ranking.

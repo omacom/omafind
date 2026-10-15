@@ -3,6 +3,8 @@
 //!
 //! Vectors and keywords are two views of the same `chunks` rows: `vectors` is keyed by chunk id and scanned in
 //! memory (`vectors.rs`), and FTS5 is an external-content table over `chunks.text`, kept in step by triggers.
+//! `vectors` holds only what the scan loads (int8 rows, five to a page); the float32 originals, read for the few
+//! hundred rows a search rescores, live apart in `vectors_full`, so a cold start reads a sixth of the bytes, in order.
 
 mod vectors;
 pub use vectors::{Candidate, RowMeta, VectorIndex, quantize};
@@ -14,7 +16,7 @@ use anyhow::{Context, Result, bail};
 use omafind_core::{ChunkKind, FileKind, Modality};
 use rusqlite::{Connection, OptionalExtension, params};
 
-pub const SCHEMA_VERSION: u32 = 2;
+pub const SCHEMA_VERSION: u32 = 3;
 
 static VEC_EXTENSION: Once = Once::new();
 
@@ -214,11 +216,11 @@ impl Store {
             return Ok(false);
         }
         let objects: i64 = self.conn.query_row(
-            "SELECT count(*) FROM sqlite_master WHERE name IN ('names_fts', 'vectors_file', 'files_names_au', 'chunks_ad_v2')",
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('names_fts', 'vectors_file', 'files_names_au', 'chunks_ad_v2', 'vectors_full', 'vectors_ad_v3')",
             [],
             |r| r.get(0),
         )?;
-        Ok(objects == 4)
+        Ok(objects == 6)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -233,6 +235,7 @@ impl Store {
         )? > 0;
         self.conn
             .execute_batch("DROP TRIGGER IF EXISTS chunks_ad;")?;
+        self.split_vectors()?;
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS roots (
@@ -267,15 +270,19 @@ impl Store {
                file_kind INTEGER NOT NULL,
                modality INTEGER NOT NULL,
                scale REAL NOT NULL,
-               q BLOB NOT NULL,
+               q BLOB NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS vectors_full (
+               chunk_id INTEGER PRIMARY KEY,
                f BLOB NOT NULL
              );
              CREATE TABLE IF NOT EXISTS vectors_gone (
                seq INTEGER PRIMARY KEY AUTOINCREMENT,
                chunk_id INTEGER NOT NULL
              );
-             CREATE TRIGGER IF NOT EXISTS vectors_ad AFTER DELETE ON vectors BEGIN
+             CREATE TRIGGER IF NOT EXISTS vectors_ad_v3 AFTER DELETE ON vectors BEGIN
                INSERT INTO vectors_gone(chunk_id) VALUES (old.chunk_id);
+               DELETE FROM vectors_full WHERE chunk_id = old.chunk_id;
              END;
              CREATE TABLE IF NOT EXISTS searches (
                query TEXT PRIMARY KEY,
@@ -384,6 +391,49 @@ impl Store {
                INSERT INTO names_fts(rowid, name) VALUES (new.id, new.name);
              END;",
         )?;
+        Ok(())
+    }
+
+    /// Schema 2 kept each float32 vector in the same row as its int8 copy, about a page per row, so loading the
+    /// matrix from a cold disk read the whole table (5.6 s per 100k rows on a hard disk, against 0.5 s split). The
+    /// rows move as they are; nothing re-embeds. The triggers naming `vectors` go first: a rename checks every one.
+    fn split_vectors(&self) -> Result<()> {
+        let has_f: i64 = self.conn.query_row(
+            "SELECT count(*) FROM pragma_table_info('vectors') WHERE name = 'f'",
+            [],
+            |r| r.get(0),
+        )?;
+        if has_f == 0 {
+            return Ok(());
+        }
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute_batch(
+            "DROP TRIGGER IF EXISTS vectors_ad;
+             DROP TRIGGER IF EXISTS chunks_ad_v2;
+             CREATE TABLE vectors_full (chunk_id INTEGER PRIMARY KEY, f BLOB NOT NULL);
+             INSERT INTO vectors_full SELECT chunk_id, f FROM vectors ORDER BY chunk_id;
+             CREATE TABLE vectors_split (
+               seq INTEGER PRIMARY KEY AUTOINCREMENT,
+               chunk_id INTEGER NOT NULL UNIQUE,
+               file_id INTEGER NOT NULL,
+               file_kind INTEGER NOT NULL,
+               modality INTEGER NOT NULL,
+               scale REAL NOT NULL,
+               q BLOB NOT NULL
+             );
+             INSERT INTO vectors_split SELECT seq, chunk_id, file_id, file_kind, modality, scale, q FROM vectors ORDER BY seq;
+             CREATE TEMP TABLE last_seq AS SELECT seq FROM sqlite_sequence WHERE name = 'vectors';
+             DROP TABLE vectors;
+             ALTER TABLE vectors_split RENAME TO vectors;
+             UPDATE sqlite_sequence SET seq = max(seq, coalesce((SELECT seq FROM last_seq), 0)) WHERE name = 'vectors';
+             DROP TABLE last_seq;",
+        )?;
+        tx.commit()?;
+        // The old table's pages are free now, half the file: give them back while nothing else uses the index (on
+        // the first open after an upgrade). Busy is fine, SQLite reuses free pages anyway.
+        if let Err(e) = self.conn.execute_batch("VACUUM;") {
+            eprintln!("omafind: index not compacted after the schema 3 split: {e}");
+        }
         Ok(())
     }
 
@@ -977,7 +1027,7 @@ impl Store {
         let blob: Option<Vec<u8>> = self
             .conn
             .query_row(
-                "SELECT f FROM vectors WHERE chunk_id = ?1",
+                "SELECT f FROM vectors_full WHERE chunk_id = ?1",
                 [chunk_id],
                 |r| r.get(0),
             )
@@ -1056,11 +1106,16 @@ fn insert_vector(
 ) -> Result<()> {
     let (q, scale) = quantize(vector);
     let q: Vec<u8> = q.into_iter().map(|b| b as u8).collect();
-    conn.prepare_cached(
-        "INSERT INTO vectors(chunk_id, file_id, file_kind, modality, scale, q, f) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
-         ON CONFLICT(chunk_id) DO NOTHING",
-    )?
-    .execute(params![chunk_id, file_id, vectors::kind_code(kind) as i64, vectors::modality_code(modality) as i64, scale as f64, q, as_bytes(vector)])?;
+    let added = conn
+        .prepare_cached(
+            "INSERT INTO vectors(chunk_id, file_id, file_kind, modality, scale, q) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+             ON CONFLICT(chunk_id) DO NOTHING",
+        )?
+        .execute(params![chunk_id, file_id, vectors::kind_code(kind) as i64, vectors::modality_code(modality) as i64, scale as f64, q])?;
+    if added > 0 {
+        conn.prepare_cached("INSERT OR REPLACE INTO vectors_full(chunk_id, f) VALUES (?1, ?2)")?
+            .execute(params![chunk_id, as_bytes(vector)])?;
+    }
     Ok(())
 }
 
@@ -1160,7 +1215,7 @@ mod tests {
             )?;
         }
         let store = Store::open(&path)?;
-        assert_eq!(store.get_meta("schema_version")?.as_deref(), Some("2"));
+        assert_eq!(store.get_meta("schema_version")?.as_deref(), Some("3"));
         assert_eq!(store.knn(&unit(3), 5)?[0].0, 2);
         assert_eq!(
             store.names_like(&["beach".into()], 5, &Filter::default())?,
@@ -1173,6 +1228,79 @@ mod tests {
         store.remove_file(Path::new("/p/beach-day.jpg"))?;
         index.refresh(&store)?;
         assert_eq!(index.len(), 0);
+        Ok(())
+    }
+
+    #[test]
+    fn a_schema_2_index_splits_its_vectors_without_re_embedding() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("two.sqlite");
+        {
+            let mut store = Store::open(&path)?;
+            for (i, name) in ["a", "b"].iter().enumerate() {
+                let (id, _) =
+                    store.see_file(Path::new(&format!("/p/{name}.jpg")), 1, 1, FileKind::Image)?;
+                store.write_chunks(
+                    id,
+                    &[NewChunk {
+                        kind: ChunkKind::Image,
+                        modality: Modality::Image,
+                        locator: None,
+                        locator_end: None,
+                        text: String::new(),
+                        vector: Some(unit(i)),
+                    }],
+                )?;
+            }
+            store.remove_file(Path::new("/p/a.jpg"))?;
+            // Back to schema 2's shape: the float32 copy in the same row, the old triggers.
+            store.conn.execute_batch(
+                "DROP TRIGGER vectors_ad_v3;
+                 DROP TRIGGER chunks_ad_v2;
+                 ALTER TABLE vectors ADD COLUMN f BLOB NOT NULL DEFAULT x'';
+                 UPDATE vectors SET f = (SELECT f FROM vectors_full x WHERE x.chunk_id = vectors.chunk_id);
+                 DROP TABLE vectors_full;
+                 CREATE TRIGGER vectors_ad AFTER DELETE ON vectors BEGIN
+                   INSERT INTO vectors_gone(chunk_id) VALUES (old.chunk_id);
+                 END;
+                 CREATE TRIGGER chunks_ad_v2 AFTER DELETE ON chunks BEGIN
+                   INSERT INTO fts_chunks(fts_chunks, rowid, text) VALUES ('delete', old.id, old.text);
+                   DELETE FROM vectors WHERE chunk_id = old.id;
+                 END;
+                 UPDATE meta SET value = '2' WHERE key = 'schema_version';",
+            )?;
+        }
+        let mut store = Store::open(&path)?;
+        assert_eq!(store.get_meta("schema_version")?.as_deref(), Some("3"));
+        assert_eq!(store.knn(&unit(1), 5)?[0].1, 1.0);
+        let last: i64 = store.conn.query_row(
+            "SELECT seq FROM sqlite_sequence WHERE name = 'vectors'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert_eq!(last, 2);
+        // New vectors continue the sequence, and removing a file still takes both copies.
+        let (id, _) = store.see_file(Path::new("/p/c.jpg"), 1, 1, FileKind::Image)?;
+        store.write_chunks(
+            id,
+            &[NewChunk {
+                kind: ChunkKind::Image,
+                modality: Modality::Image,
+                locator: None,
+                locator_end: None,
+                text: String::new(),
+                vector: Some(unit(2)),
+            }],
+        )?;
+        let seq: i64 = store
+            .conn
+            .query_row("SELECT max(seq) FROM vectors", [], |r| r.get(0))?;
+        assert_eq!(seq, 3);
+        store.remove_file(Path::new("/p/b.jpg"))?;
+        let full: i64 = store
+            .conn
+            .query_row("SELECT count(*) FROM vectors_full", [], |r| r.get(0))?;
+        assert_eq!((store.stats()?.vectors, full), (1, 1));
         Ok(())
     }
 

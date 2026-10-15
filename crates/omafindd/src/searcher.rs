@@ -45,6 +45,7 @@ pub struct Searcher {
     latest: Mutex<HashMap<String, u64>>,
     cpu: bool,
     unload_after: Duration,
+    paths: [PathBuf; 2],
 }
 
 /// How long after the window hides the encoder stays loaded.
@@ -86,6 +87,7 @@ impl Searcher {
             latest: Mutex::new(HashMap::new()),
             cpu,
             unload_after: Duration::from_secs(unload_after_minutes.max(1) * 60),
+            paths: [index_path, code_index_path],
         });
         let keep = if unload_after_minutes == 0 {
             None
@@ -154,8 +156,32 @@ impl Searcher {
             self.vector_bytes
                 .store(main.bytes() + code.bytes(), Ordering::Relaxed);
             stores.vectors = Some((main, code));
+            self.prefetch();
         }
         Ok(())
+    }
+
+    /// Reads the float32 vectors once, in the background, on connections of its own: a search rescores a few hundred
+    /// of them, and from a cold hard disk those scattered reads cost ~1.5 s per search until they are cached.
+    fn prefetch(&self) {
+        let paths = self.paths.clone();
+        let _ = std::thread::Builder::new()
+            .name("omafind-prefetch".into())
+            .spawn(move || {
+                let t = Instant::now();
+                let mut bytes = 0;
+                for path in &paths {
+                    match Store::open(path).and_then(|s| s.prefetch_full()) {
+                        Ok(n) => bytes += n,
+                        Err(e) => crate::log!("couldn't prefetch {}: {e:#}", path.display()),
+                    }
+                }
+                crate::log!(
+                    "float vectors read in {:.2} s ({} MB)",
+                    t.elapsed().as_secs_f64(),
+                    bytes >> 20
+                );
+            });
     }
 
     /// The window hid: unload after a short grace period rather than the full idle time.

@@ -311,13 +311,24 @@ impl Store {
             })?)
     }
 
+    /// Reads every float32 vector once, in rowid order, so the page cache holds them before searches rescore;
+    /// returns the bytes read.
+    pub fn prefetch_full(&self) -> Result<u64> {
+        Ok(self.conn.query_row(
+            "SELECT coalesce(sum(length(f)), 0) FROM vectors_full",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64)
+    }
+
     /// Exact cosine similarity of `query` against these chunks' float32 vectors, with each chunk's modality.
     pub fn rescore(&self, query: &[f32], ids: &[i64]) -> Result<Vec<(i64, f32, Modality)>> {
         let mut out = Vec::with_capacity(ids.len());
         for batch in ids.chunks(500) {
             let marks = vec!["?"; batch.len()].join(",");
             let mut stmt = self.conn.prepare(&format!(
-                "SELECT chunk_id, modality, f FROM vectors WHERE chunk_id IN ({marks})"
+                "SELECT v.chunk_id, v.modality, x.f FROM vectors v JOIN vectors_full x ON x.chunk_id = v.chunk_id
+                 WHERE v.chunk_id IN ({marks})"
             ))?;
             let mut rows = stmt.query(rusqlite::params_from_iter(batch.iter()))?;
             while let Some(r) = rows.next()? {
