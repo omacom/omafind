@@ -555,11 +555,12 @@ export default class Omafind extends View {
       .child(
         h_flex()
           .w_full()
-          .h(56)
-          .px(18)
-          .gap(12)
+          .h(48)
+          .pl(16)
+          .pr(9)
+          .gap(10)
           .items_center()
-          .child(div().text_size(17).text_color(c.muted_foreground).child(this.like ? "\u{f0c5}" : "\u{f002}"))
+          .child(div().text_size(15).text_color(c.muted_foreground).child(this.like ? "\u{f0c5}" : "\u{f002}"))
           .child(
             this.like
               ? h_flex().flex_1().gap(8).items_center().text_size(14)
@@ -575,9 +576,65 @@ export default class Omafind extends View {
                   .text_size(15)
                   .token((t, cx) => this.chipToken(t, cx)),
           )
-          .child(div().text_size(11).text_color(c.muted_foreground).child(this.tookMs !== null && !this.quickShown ? `${Math.round(this.tookMs)} ms` : "")),
+          .child(div().text_size(11).text_color(c.muted_foreground).child(this.tookMs !== null && !this.quickShown ? `${Math.round(this.tookMs)} ms` : ""))
+          .child(this.barActions(cx)),
       )
       .child(indexing ? this.progressLine(s, cx) : div().h(1).w_full().bg(c.border));
+  }
+
+  /** The selected result's two likeliest actions, at the bar's right end: what Enter does, and the next thing
+   *  people do with that kind of file (more like a photo or a video frame, the folder of a document). */
+  barActions(cx) {
+    const row = this.mode === "setup" || this.menu ? null : this.results[this.selected];
+    if (!row) return div();
+    const c = cx.theme().colors;
+    const visual = row.kind === "image" || row.kind === "screenshot" || row.kind === "video";
+    const second = visual
+      ? { icon: "\u{f0c5}", label: "Similar", keys: "⌃S", run: (cx) => this.moreLikeThis(cx) }
+      : { icon: "\u{f07b}", label: "Show in Files", keys: "⌃⏎", run: () => reveal(row.path) };
+    return h_flex()
+      .gap(6)
+      .items_center()
+      .child(div().w(1).h(20).mx(2).bg(c.border))
+      .child(this.barButton(second, false, cx))
+      .child(this.barButton({ label: primaryLabel(row), keys: "⏎", run: (cx) => this.openSelected(cx) }, true, cx));
+  }
+
+  barButton(action, primary, cx) {
+    const c = cx.theme().colors;
+    const keycap = div()
+      .h(16)
+      .min_w(16)
+      .px(4)
+      .flex()
+      .items_center()
+      .justify_center()
+      .rounded(3)
+      .text_size(10)
+      .bg(primary ? alpha(c.primary_foreground, 0.18) : c.background)
+      .border(primary ? 0 : 1)
+      .border_color(c.border)
+      .text_color(primary ? c.primary_foreground : c.muted_foreground)
+      .child(action.keys);
+    return h_flex()
+      .id(`bar-${action.label}`)
+      .h(30)
+      .pl(action.icon ? 10 : 12)
+      .pr(7)
+      .gap(action.icon ? 7 : 8)
+      .items_center()
+      .rounded(5)
+      .text_size(12)
+      .bg(primary ? c.primary : c.background)
+      .border(primary ? 0 : 1)
+      .border_color(c.border)
+      .text_color(primary ? c.primary_foreground : c.foreground)
+      .when(primary, (d) => d.font_semibold())
+      .hover((st) => st.bg(primary ? alpha(c.primary, 0.85) : c.muted))
+      .on_click((_e, cx) => action.run(cx))
+      .child(action.icon ? div().text_size(12).text_color(c.muted_foreground).child(action.icon) : div())
+      .child(div().child(action.label))
+      .child(keycap);
   }
 
   chipToken(t, cx) {
@@ -680,25 +737,6 @@ export default class Omafind extends View {
       );
   }
 
-  button(label, cx, primary, onClick) {
-    const c = cx.theme().colors;
-    return div()
-      .id(`btn-${label}`)
-      .h(30)
-      .px(12)
-      .flex()
-      .items_center()
-      .rounded(4)
-      .text_size(12)
-      .bg(primary ? c.primary : c.background)
-      .border(1)
-      .border_color(primary ? c.primary : c.border)
-      .text_color(primary ? c.primary_foreground : c.foreground)
-      .hover((s) => s.bg(primary ? alpha(c.primary, 0.85) : c.muted))
-      .on_click((_e, cx) => onClick(cx))
-      .child(label);
-  }
-
   preview(cx) {
     const c = cx.theme().colors;
     const row = this.results[this.selected];
@@ -742,10 +780,6 @@ export default class Omafind extends View {
         .child(div().text_size(48).text_color(c.muted_foreground).child(glyph(row.kind)))
         .child(div().text_size(12).text_color(c.muted_foreground).child(row.reason === "sound" ? `Matched by sound${row.locatorLabel ? ", " + row.locatorLabel : ""}` : ""));
     }
-    const primary =
-      row.kind === "pdf" && row.locator ? `Open at page ${row.locator} ⏎` :
-      (row.kind === "video" || row.kind === "audio") && row.locator != null ? `Play from ${row.locatorLabel} ⏎` :
-      row.kind === "code" && row.locator ? `Open at line ${row.locator} ⏎` : "Open ⏎";
     return v_flex()
       .flex_1()
       .min_w_0()
@@ -761,15 +795,7 @@ export default class Omafind extends View {
           .child(h_flex().gap(8).items_center().child(div().text_size(14).font_medium().text_color(c.foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(row.name)).child(this.pill(tag(row), cx, true)).child(row.duplicates.length ? this.pill(`${row.duplicates.length} more like it: ${row.duplicates.map((d) => d.split("/").pop()).slice(0, 3).join(", ")}${row.duplicates.length > 3 ? "…" : ""}`, cx, false) : div()))
           .child(div().text_size(11).text_color(c.muted_foreground).overflow_hidden().whitespace_nowrap().text_ellipsis().child(info)),
       )
-      .child(body)
-      .child(
-        h_flex()
-          .gap(8)
-          .child(this.button(primary, cx, true, (cx) => this.openSelected(cx)))
-          .child(this.button("Reveal ⌃⏎", cx, false, () => reveal(row.path)))
-          .child(this.button("Similar ⌃S", cx, false, (cx) => this.moreLikeThis(cx)))
-          .child(this.button("More ⌃K", cx, false, (cx) => this.openMenu(cx))),
-      );
+      .child(body);
   }
 
   passageView(row, p, height, cx) {
@@ -1013,7 +1039,7 @@ export default class Omafind extends View {
     let hints;
     if (this.mode === "setup") hints = "↑↓ move · space toggle · ⏎ start · esc back";
     else if (this.menu) hints = "↑↓ move · ⏎ run · esc back";
-    else if (this.results.length) hints = this.isGrid() ? "←↑↓→ move · ⏎ open · ⌃S similar · ⌃K actions · esc close" : "↑↓ move · ⏎ open · ⌃S similar · ⌃K actions · esc close";
+    else if (this.results.length) hints = `${this.isGrid() ? "←↑↓→" : "↑↓"} move · ⏎ ${openVerb(this.results[this.selected])} · ⌃S similar · ⌃K actions · esc close`;
     else hints = "↑ last search · ⇥ filter · ⌃, settings · esc close";
     return h_flex()
       .w_full()
@@ -1077,6 +1103,23 @@ export default class Omafind extends View {
       .child(this.footer(cx))
       .child(this.menu ? this.menuView(cx) : div());
   }
+}
+
+// What Enter does to this row, for the footer: a page, a moment or a line when the hit has one.
+function openVerb(row) {
+  if (!row) return "open";
+  if (row.kind === "pdf" && row.locator) return `open at page ${row.locator}`;
+  if ((row.kind === "video" || row.kind === "audio") && row.locator != null) return `play from ${row.locatorLabel}`;
+  if (row.kind === "code" && row.locator) return `open at line ${row.locator}`;
+  return "open";
+}
+
+// The bar's main button: the same as Enter, short enough to sit beside the query.
+function primaryLabel(row) {
+  if (row.kind === "pdf" && row.locator) return `Open at p. ${row.locator}`;
+  if ((row.kind === "video" || row.kind === "audio") && row.locator != null) return `Play from ${row.locatorLabel}`;
+  if (row.kind === "code" && row.locator) return `Open at line ${row.locator}`;
+  return "Open";
 }
 
 function thumbKey(row) {
