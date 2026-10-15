@@ -260,6 +260,7 @@ fn toggle() -> Result<()> {
 fn watch() -> Result<()> {
     let client = Client::connect()?;
     if !std::io::stderr().is_terminal() {
+        let mut busy_seen = false;
         return client.subscribe(|event| {
             match event {
                 omafind_client::Event::Status(s) => {
@@ -274,7 +275,7 @@ fn watch() -> Result<()> {
                         "{:<18} {} indexed, {} pending, {} failed{current}",
                         s.state, s.indexed, s.pending, s.failed
                     );
-                    if finished(&s) {
+                    if finished(&s, &mut busy_seen) {
                         return false;
                     }
                 }
@@ -298,6 +299,7 @@ fn watch() -> Result<()> {
     // On a terminal: one bar over every file, the one being read as its message.
     let bar = cliclack::progress_bar(1);
     let mut started = false;
+    let mut busy_seen = false;
     let mut failures: Vec<(PathBuf, String)> = Vec::new();
     client.subscribe(|event| {
         match event {
@@ -319,7 +321,7 @@ fn watch() -> Result<()> {
                 } else {
                     bar.set_message(&message);
                 }
-                if finished(&s) {
+                if finished(&s, &mut busy_seen) {
                     bar.stop(format!("{} files indexed, {} failed", s.indexed, s.failed));
                     return false;
                 }
@@ -332,8 +334,14 @@ fn watch() -> Result<()> {
     report_failures(&failures)
 }
 
-fn finished(s: &omafind_client::Status) -> bool {
-    s.state == "idle" && s.pending == 0 && !s.worker_running
+/// Indexing is over: the daemon is idle with nothing pending, after it has been seen busy (or has files to show for
+/// it). A daemon that has only just started is idle before its first crawl.
+fn finished(s: &omafind_client::Status, busy_seen: &mut bool) -> bool {
+    if s.state != "idle" || s.pending > 0 || s.worker_running {
+        *busy_seen = true;
+        return false;
+    }
+    *busy_seen || s.indexed + s.failed > 0 || s.roots.is_empty()
 }
 
 /// Files that couldn't be read, after a progress bar: the first few, and where to find the rest.

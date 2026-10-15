@@ -198,8 +198,9 @@ impl<'a> Indexer<'a> {
                     }
                 }
             }
-            // Media, one at a time (each is its own model run).
-            for (i, (file, chunks)) in work.iter().enumerate() {
+            // Media one file at a time (each is its own model run), and each file written as soon as it is done,
+            // so progress moves per file rather than per round. A pause between files leaves the rest pending.
+            for (i, (file, chunks)) in work.into_iter().enumerate() {
                 if chunks
                     .iter()
                     .any(|c| matches!(c.embed, Embed::Image { .. } | Embed::Audio { .. }))
@@ -233,12 +234,8 @@ impl<'a> Indexer<'a> {
                         Err(error) => errors[i][j] = Some(format!("{error:#}")),
                     }
                 }
-            }
-            // Audio windows and frames of this round are no longer needed once written below.
-            let scratch = omafind_extract::media::scratch_dir();
-            // Write each file: a chunk whose embedding failed is kept for keywords; a file whose only content
-            // chunk failed is marked failed so the error is visible.
-            for (i, (file, chunks)) in work.into_iter().enumerate() {
+                // A chunk whose embedding failed is kept for keywords; a file whose only content chunk failed is
+                // marked failed so the error is visible.
                 let mut rows = Vec::with_capacity(chunks.len());
                 let mut content_failed: Option<String> = None;
                 let mut content_ok = false;
@@ -264,7 +261,6 @@ impl<'a> Indexer<'a> {
                         vector,
                     });
                 }
-                let _ = &scratch;
                 match (content_ok, content_failed) {
                     (false, Some(error)) => {
                         self.store.mark_failed(file.id, &error)?;

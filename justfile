@@ -1,6 +1,9 @@
 # Omafind's everyday commands. `just` lists them.
 alias c := check
 alias t := test
+alias v := version
+alias b := build
+alias d := dev
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
@@ -42,6 +45,10 @@ dev:
 # Install for this user (binaries, UI, desktop entry), then `omafind setup`
 install *args:
     ./install.sh {{ args }}
+
+# update the version number (x.y.z | patch | minor | major) for app
+version VER:
+    cargo set-version {{ if VER =~ "^(patch|minor|major)$" { "--bump " + VER } else { VER } }}
 
 # --- quality -----------------------------------------------------------------------------------------------------
 
@@ -121,8 +128,13 @@ sandbox-app:
 sandbox-stop:
     #!/bin/bash
     for f in "{{ sandbox }}"/omafindd.pid "{{ sandbox }}"/omafind-app.pid; do
-      [[ -f $f ]] && kill "$(cat "$f")" 2>/dev/null && echo "stopped $(cat "$f")"
+      [[ -f $f ]] || continue
+      pid=$(cat "$f")
       rm -f "$f"
+      kill "$pid" 2>/dev/null || continue
+      # The daemon stops its worker first: wait until it is really gone.
+      for _ in $(seq 50); do kill -0 "$pid" 2>/dev/null || break; sleep 0.1; done
+      echo "stopped $pid"
     done
 
 # --- the installed service ---------------------------------------------------------------------------------------
