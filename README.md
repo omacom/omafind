@@ -6,6 +6,8 @@ finds the page of the PDF, *where they talk about sleep* finds the moment in the
 the text on them), PDFs (scans too), documents (txt, md, html, docx, odt, epub), audio, video and, opt-in, code.
 Nothing leaves the machine.
 
+![Omafind searching "the clause about pets in the lease": the lease PDF found at the page, with the matched passage under the page preview](assets/screenshot.png)
+
 The window follows your Omarchy theme and font, live. Results open where the match is: the video at the second,
 the PDF at the page, the code at the line.
 

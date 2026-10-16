@@ -266,4 +266,6 @@ Then `./target/debug/omafind-app --dev --ui $PWD/ui &`, `hyprctl clients -j` (cl
   socket pushes.
 - Rust edition 2024, workspace deps in the root `Cargo.toml`. Comments say why, not what.
 - Commit only when the user asks; never add a Claude co-author trailer or "Generated with" line.
-- Keep third-party media out of git (`evals/testbed/` is ignored); commit synthetic inputs only.
+- Keep third-party media out of git (`evals/testbed/` is ignored); commit synthetic inputs only. That includes the
+  README's `assets/screenshot.png`: retake it on the demo home (`just demo`, `just demo-app`) with nothing from the
+  testbed on screen (its photos are Commons images under CC licenses), e.g. a search filtered to Documents.
