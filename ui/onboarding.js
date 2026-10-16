@@ -324,7 +324,7 @@ export class Onboarding {
       .child(
         v_flex().px(2).gap(6).text_size(11).text_color(c.muted_foreground)
           .child(div().whitespace_normal().child("Reads text, pictures and sound. Downloaded once, runs on this computer. You can pick folders while it downloads."))
-          .child(div().whitespace_normal().child("From Hugging Face (ggml-org/embeddinggemma-2-GGUF), checked against its SHA-256."))
+          .child(div().whitespace_normal().child("By Google DeepMind, under the Apache License 2.0. From Hugging Face (ggml-org/embeddinggemma-2-GGUF), checked against its SHA-256."))
           .child(div().child("Saved in ~/.local/share/omafind/models")),
       );
   }

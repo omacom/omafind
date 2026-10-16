@@ -87,7 +87,7 @@ pub fn run(options: Options) -> Result<()> {
     } else {
         let mb: u64 = missing.iter().map(|f| f.bytes).sum::<u64>() / 1_000_000;
         let question = format!(
-            "Download the EmbeddingGemma 2 model files ({mb} MB) into {}?",
+            "Download the EmbeddingGemma 2 model files by Google DeepMind (Apache 2.0, {mb} MB) into {}?",
             tilde(&models)
         );
         if ui::confirm(question, options.yes, WHAT)? && !dry {

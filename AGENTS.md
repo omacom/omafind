@@ -71,6 +71,8 @@ crates/omafind-app       GPUI Shell host: window (app id `omafind`), `omafind` h
                      watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/omafind/thumbs), actions.rs
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
 packaging/           PKGBUILD, omafind.install, omafind.desktop, omafind.lua (what `omafind setup` writes to ~/.config/hypr/omafind.lua)
+THIRD_PARTY_NOTICES.md  the model (EmbeddingGemma 2, Google DeepMind, Apache-2.0) and llama.cpp (MIT): keep it in step with
+                     the pins; the package installs it under /usr/share/licenses/omafind
 install.sh           from-checkout install for one user, then the window's onboarding (or `omafind setup` with flags)
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
 evals/               make-testbed.sh; evals/testbed/ holds local test media (ignored)

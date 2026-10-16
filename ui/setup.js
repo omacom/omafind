@@ -469,7 +469,7 @@ export class Setup {
         }
         case "models": {
           const missing = !this.textModel || !this.mediaModel;
-          const caption = progress ? progress.message : this.downloading ? "Downloading…" : missing ? "865 MB, once · stays on this machine" : "Text, image and audio encoders on this machine";
+          const caption = progress ? progress.message : this.downloading ? "Downloading…" : missing ? "865 MB, once · stays on this machine" : "By Google DeepMind · Apache 2.0 · on this machine";
           return v_flex().w_full()
             .child(row(it.row, 46, missing ? (this.textModel ? "Image and audio encoders missing" : "Download the model files") : "EmbeddingGemma 2", caption, this.downloading ? "\u{f110}" : missing ? "\u{f019}" : "\u{f00c}", missing ? null : { text: "installed", color: c.muted_foreground }, toggle, false))
             .child(progress ? div().mx(12).h(3).rounded(2).bg(c.muted).child(div().h(3).w(`${Math.round(progress.fraction * 100)}%`).rounded(2).bg(c.primary)) : div());

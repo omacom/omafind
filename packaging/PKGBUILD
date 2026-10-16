@@ -56,4 +56,5 @@ package() {
   install -dm755 "$pkgdir/usr/lib/omafind/engine"
   cp -a "$srcdir/engine/lib/." "$pkgdir/usr/lib/omafind/engine/"
   install -Dm644 "$srcdir/llama-$_llama/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE.llama.cpp"
+  install -Dm644 LICENSE THIRD_PARTY_NOTICES.md -t "$pkgdir/usr/share/licenses/$pkgname/"
 }

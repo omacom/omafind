@@ -40,3 +40,11 @@ EmbeddingGemma 2 (text, vision and audio in one 768-dimension space) runs on lla
 in a worker that exits when the queue is empty, and answers searches over a socket: nearest vectors plus exact
 keywords (FTS5), fused and gated so only matches that stand out are shown. `omafind-app` is a GPUI Shell window whose UI
 is a small JavaScript file you can restyle. Developer notes are in [AGENTS.md](AGENTS.md).
+
+## Credits
+
+Omafind is MIT licensed ([LICENSE](LICENSE)). The model is [EmbeddingGemma 2](https://huggingface.co/google/embeddinggemma-2) by Google
+DeepMind, under the Apache License 2.0 and the [Gemma Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy),
+in [ggml-org's GGUF conversion](https://huggingface.co/ggml-org/embeddinggemma-2-GGUF); it is downloaded at setup, not
+shipped with Omafind. It runs on [llama.cpp](https://github.com/ggml-org/llama.cpp) (MIT). Details in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
