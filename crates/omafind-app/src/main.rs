@@ -9,6 +9,7 @@
 
 mod actions;
 mod hypr;
+mod portal;
 mod theme;
 
 use std::path::{Path, PathBuf};
@@ -123,19 +124,30 @@ export function copy(path: string): boolean;
 export function hide(): void;
 
 /** A folder the setup screen offers. */
-export interface Folder { path: string; label: string; summary: string; selected: boolean; files: number }
+/** `chosen`: in the config now (indexed); `selected`: what the screen starts with (the defaults on a first run). */
+export interface Folder { path: string; label: string; summary: string; selected: boolean; chosen: boolean; files: number }
+export interface Power { pauseInPowerSaver: boolean; waitForAc: boolean }
 export interface Candidates {
   folders: Folder[];
   /** Folders that look like code, for the optional code index. */
   code: Folder[];
+  power: Power;
+  /** Folders are in the config: settings, not a first run. */
+  configured: boolean;
+  /** The index files' size on disk. */
+  indexBytes: number;
   textModel: boolean; mediaModel: boolean;
   daemonEnabled: boolean;
   binding: boolean; rules: boolean; autostart: boolean;
 }
 /** Surveys the candidate folders (a few seconds at most). */
 export function candidates(): Promise<Candidates>;
-/** Saves the folders, starts the daemon at login if needed, adds the Hyprland lines; answers with a summary. */
-export function applySetup(options: { folders: string[]; code: string[]; hyprland: boolean; autostart: boolean }): Promise<string>;
+/** The desktop's folder chooser; null when cancelled. */
+export function pickFolder(): Promise<string | null>;
+/** What a folder holds and how long it would take, as `candidates` reports it. */
+export function surveyFolder(path: string, code: boolean): Promise<Folder>;
+/** Saves the folders and power settings, starts the daemon at login if needed, adds the Hyprland lines; answers with a summary. */
+export function applySetup(options: { folders: string[]; code: string[]; power: Power; hyprland: boolean; autostart: boolean }): Promise<string>;
 /** Downloads the model files that are missing; progress through `setupProgress()`. */
 export function downloadModels(): Promise<boolean>;
 export function setupProgress(): { message: string; fraction: number } | null;
@@ -393,14 +405,32 @@ fn status_value(state: &State) -> HostValue {
         .into()
 }
 
-fn folder_value(survey: &omafind_index::survey::Survey, selected: bool) -> HostValue {
+fn folder_value(survey: &omafind_index::survey::Survey, selected: bool, chosen: bool) -> HostValue {
     HostObject::new()
         .field("path", survey.path.to_string_lossy().into_owned())
         .field("label", omafind_core::paths::tilde(&survey.path))
         .field("summary", survey.summary())
         .field("selected", selected)
+        .field("chosen", chosen)
         .field("files", survey.files as f64)
         .into()
+}
+
+/// The index files on disk, SQLite's sidecars included.
+fn index_bytes() -> u64 {
+    [
+        omafind_core::paths::index_path(),
+        omafind_core::paths::code_index_path(),
+    ]
+    .iter()
+    .flat_map(|p| {
+        ["", "-wal", "-shm"].map(|suffix| {
+            let mut name = p.clone().into_os_string();
+            name.push(suffix);
+            std::fs::metadata(name).map(|m| m.len()).unwrap_or(0)
+        })
+    })
+    .sum()
 }
 
 fn strings(value: Option<&HostValue>) -> Vec<String> {
@@ -446,6 +476,7 @@ fn omafind_module(shared: Shared) -> HostModule {
                 let value = executor
                     .spawn(async move {
                         let config = omafind_core::config::Config::load().unwrap_or_default();
+                        let (chosen, chosen_code) = (config.folders(), config.code_roots());
                         let folders = omafind_setup::candidate_folders(&config);
                         let code = omafind_setup::candidate_code_folders(&config);
                         let models = omafind_core::model::dir();
@@ -457,16 +488,33 @@ fn omafind_module(shared: Shared) -> HostModule {
                                     HostValue::Array(
                                         folders
                                             .iter()
-                                            .map(|(s, on)| folder_value(s, *on))
+                                            .map(|(s, on)| {
+                                                folder_value(s, *on, chosen.contains(&s.path))
+                                            })
                                             .collect(),
                                     ),
                                 )
                                 .field(
                                     "code",
                                     HostValue::Array(
-                                        code.iter().map(|(s, on)| folder_value(s, *on)).collect(),
+                                        code.iter()
+                                            .map(|(s, on)| {
+                                                folder_value(s, *on, chosen_code.contains(&s.path))
+                                            })
+                                            .collect(),
                                     ),
                                 )
+                                .field(
+                                    "power",
+                                    HostObject::new()
+                                        .field(
+                                            "pauseInPowerSaver",
+                                            config.power.pause_in_power_saver,
+                                        )
+                                        .field("waitForAc", config.power.wait_for_ac),
+                                )
+                                .field("configured", !chosen.is_empty() || !chosen_code.is_empty())
+                                .field("indexBytes", index_bytes() as f64)
                                 .field(
                                     "textModel",
                                     omafind_setup::download::present(
@@ -564,12 +612,26 @@ fn omafind_module(shared: Shared) -> HostModule {
                 .and_then(|o| o.get("autostart"))
                 .map(|v| matches!(v, HostValue::Bool(true)))
                 .unwrap_or(true);
+            let power = options.and_then(|o| o.get("power")).map(|p| {
+                let flag = |name: &str, default: bool| match p.get(name) {
+                    Some(HostValue::Bool(b)) => *b,
+                    _ => default,
+                };
+                let defaults = omafind_core::config::PowerConfig::default();
+                omafind_core::config::PowerConfig {
+                    pause_in_power_saver: flag("pauseInPowerSaver", defaults.pause_in_power_saver),
+                    wait_for_ac: flag("waitForAc", defaults.wait_for_ac),
+                }
+            });
             let executor = with_app(|cx| cx.background_executor().clone())?;
             Ok(async move {
                 let result = executor
                     .spawn(async move {
                         let mut done = Vec::new();
                         omafind_setup::set_folders(&folders, &code)?;
+                        if let Some(power) = power {
+                            omafind_setup::set_power(power)?;
+                        }
                         done.push(format!(
                             "indexing {} folder{}",
                             folders.len() + code.len(),
@@ -594,6 +656,35 @@ fn omafind_module(shared: Shared) -> HostModule {
                     Ok(message) => Ok(HostValue::from(message)),
                     Err(error) => Err(HostError::new(format!("{error:#}"))),
                 }
+            })
+        })
+        .async_function("pickFolder", |_| {
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let picked = executor
+                    .spawn(async move { portal::pick_folder("Add a folder to index") })
+                    .await;
+                match picked {
+                    Ok(Some(path)) => Ok(HostValue::from(path.to_string_lossy().into_owned())),
+                    Ok(None) => Ok(HostValue::Null),
+                    Err(error) => Err(HostError::new(format!("{error:#}"))),
+                }
+            })
+        })
+        .async_function("surveyFolder", |arguments| {
+            let path = PathBuf::from(arguments.string(0)?);
+            let code = matches!(arguments.get(1), Some(HostValue::Bool(true)));
+            let executor = with_app(|cx| cx.background_executor().clone())?;
+            Ok(async move {
+                let value = executor
+                    .spawn(async move {
+                        let survey = omafind_index::survey::survey_all(&[path], code)
+                            .into_iter()
+                            .next();
+                        survey.map(|s| folder_value(&s, true, false))
+                    })
+                    .await;
+                value.ok_or_else(|| HostError::new("can't read that folder"))
             })
         })
         .declarations(OMAFIND_TYPES)

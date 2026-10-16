@@ -155,6 +155,16 @@ fn handle(
             tx.send(Msg::SetRoots { folders, code })?;
             Response::Ok
         }
+        Request::SetPower {
+            pause_in_power_saver,
+            wait_for_ac,
+        } => {
+            tx.send(Msg::SetPower(omafind_core::config::PowerConfig {
+                pause_in_power_saver,
+                wait_for_ac,
+            }))?;
+            Response::Ok
+        }
         Request::Shutdown => {
             tx.send(Msg::Shutdown)?;
             Response::Ok

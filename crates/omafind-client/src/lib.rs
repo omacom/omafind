@@ -75,6 +75,11 @@ pub enum Request {
         #[serde(default)]
         code: Vec<PathBuf>,
     },
+    /// Change when indexing pauses for power (persisted to config).
+    SetPower {
+        pause_in_power_saver: bool,
+        wait_for_ac: bool,
+    },
     Shutdown,
 }
 

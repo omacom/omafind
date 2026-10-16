@@ -86,9 +86,19 @@ export default class Omafind extends View {
   openSetup(cx, firstRun) {
     this.mode = "setup";
     this.firstRun = firstRun;
+    this.setup.onSaved = (_message, cx) => {
+      this.firstRun = false;
+      this.closeSetup(cx);
+    };
     this.setup.load(cx);
     cx.notify();
     cx.timer.after(30, () => this.focus.focus());
+  }
+
+  /** Esc, Back, the gear: out of setup, asking first when there are unsaved changes. A first run has nowhere to go
+   *  back to, so it hides the window (the screen and its choices stay for next time). */
+  leaveSetup(cx) {
+    this.setup.leave(cx, (cx) => (this.firstRun ? hide() : this.closeSetup(cx)));
   }
 
   closeSetup(cx) {
@@ -396,12 +406,23 @@ export default class Omafind extends View {
   onKey(event, cx) {
     const key = event.keystroke;
     if (this.mode === "setup") {
+      const setup = this.setup;
+      if (setup.confirm) {
+        switch (key) {
+          case "escape": setup.keepEditing(cx); return;
+          case "enter": setup.saveAndLeave(cx, this.firstRun); return;
+          case "d": setup.discard(cx); return;
+        }
+        return;
+      }
       switch (key) {
-        case "escape": if (this.firstRun) hide(); else this.closeSetup(cx); return;
-        case "down": case "ctrl-n": case "ctrl-j": case "tab": this.setup.move(1, cx); return;
-        case "up": case "ctrl-p": case "ctrl-k": case "shift-tab": this.setup.move(-1, cx); return;
-        case "space": this.setup.toggle(cx); return;
-        case "enter": this.setup.apply(cx, (_message, cx) => { this.firstRun = false; this.closeSetup(cx); }); return;
+        case "escape": this.leaveSetup(cx); return;
+        case "down": case "ctrl-n": case "ctrl-j": case "tab": setup.move(1, cx); return;
+        case "up": case "ctrl-p": case "ctrl-k": case "shift-tab": setup.move(-1, cx); return;
+        case "space": setup.toggle(cx); return;
+        // A first run's one step forward is Start; in settings Enter acts on the row like space, Save is Ctrl+S.
+        case "enter": if (this.firstRun) setup.apply(cx, true, setup.onSaved); else setup.toggle(cx); return;
+        case "ctrl-s": setup.save(cx, this.firstRun); return;
       }
       return;
     }
@@ -1136,7 +1157,10 @@ export default class Omafind extends View {
     else if (s.state === "starting") left = "Starting: watching your folders";
     else left = `${count(s.indexed)} files · up to date`;
     let hints;
-    if (this.mode === "setup") hints = "↑↓ move · space toggle · ⏎ start · esc back";
+    if (this.mode === "setup") {
+      left = this.setup.footerNote(this.firstRun) ?? left;
+      hints = this.firstRun && !this.setup.confirm ? "↑↓ move · space toggle · ⏎ start · esc close" : this.setup.hints();
+    }
     else if (this.menu) hints = "↑↓ move · ⏎ run · esc back";
     else if (this.results.length) hints = `${this.isGrid() ? "←↑↓→" : "↑↓"} move · ⏎ ${openVerb(this.results[this.selected])} · ⌃S similar · ⌃K actions · esc close`;
     else hints = "↑ last search · ⇥ filter · ⌃, settings · esc close";
@@ -1155,7 +1179,7 @@ export default class Omafind extends View {
         h_flex()
           .gap(12)
           .child(div().child(hints))
-          .child(div().id("settings").text_size(12).hover((st) => st.text_color(c.foreground)).on_click((_e, cx) => (this.mode === "setup" ? this.closeSetup(cx) : this.openSetup(cx, false))).child("\u{f013}")),
+          .child(div().id("settings").text_size(12).hover((st) => st.text_color(c.foreground)).on_click((_e, cx) => (this.mode === "setup" ? this.leaveSetup(cx) : this.openSetup(cx, false))).child("\u{f013}")),
       );
   }
 
@@ -1193,7 +1217,12 @@ export default class Omafind extends View {
       .on_key_down((event, cx) => this.onKey(event, cx))
       .on_action("omafind_next", (_e, cx) => this.onKey({ keystroke: "tab" }, cx))
       .on_action("omafind_previous", (_e, cx) => this.onKey({ keystroke: "shift-tab" }, cx));
-    if (this.mode === "setup") return root.child(this.setup.render(cx, this.firstRun)).child(this.footer(cx));
+    if (this.mode === "setup") {
+      return root
+        .child(this.setup.render(cx, this.firstRun, (cx) => this.leaveSetup(cx)))
+        .child(this.footer(cx))
+        .child(this.setup.confirm ? this.setup.dialog(cx, this.firstRun) : div());
+    }
     const body = this.results.length === 0 ? this.empty(cx) : h_flex().flex_1().min_h_0().child(this.list(cx)).child(this.preview(cx));
     return root
       .child(this.header(cx))

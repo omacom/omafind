@@ -92,6 +92,21 @@ pub fn set_folders(folders: &[PathBuf], code: &[PathBuf]) -> Result<()> {
     Ok(())
 }
 
+/// Saves when indexing pauses for power and tells the daemon, when it runs.
+pub fn set_power(power: omafind_core::config::PowerConfig) -> Result<()> {
+    let mut config = Config::load().unwrap_or_default();
+    config.power = power.clone();
+    config.save()?;
+    if omafind_client::Client::is_running() {
+        let mut client = omafind_client::Client::connect()?;
+        client.simple(&omafind_client::Request::SetPower {
+            pause_in_power_saver: power.pause_in_power_saver,
+            wait_for_ac: power.wait_for_ac,
+        })?;
+    }
+    Ok(())
+}
+
 /// The user unit, pointing at this build's `omafindd`, unless a packaged unit exists in /usr/lib/systemd/user.
 pub fn install_unit(omafindd: &Path) -> Result<()> {
     if Path::new("/usr/lib/systemd/user/omafindd.service").exists() {

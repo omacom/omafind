@@ -29,6 +29,7 @@ pub enum Msg {
         code: Vec<PathBuf>,
     },
     Power(PowerState),
+    SetPower(omafind_core::config::PowerConfig),
     Worker(Line),
     WorkerExited,
     Shutdown,
@@ -312,6 +313,17 @@ impl Coordinator {
                         self.apply_gate();
                         self.send_status()?;
                     }
+                }
+                Msg::SetPower(power) => {
+                    {
+                        let mut state = self.shared.state.lock().unwrap();
+                        state.config.power = power;
+                        if let Err(error) = state.config.save() {
+                            crate::log!("can't save config: {error:#}");
+                        }
+                    }
+                    self.apply_gate();
+                    self.send_status()?;
                 }
                 Msg::Worker(line) => self.worker_line(line)?,
                 Msg::WorkerExited => {

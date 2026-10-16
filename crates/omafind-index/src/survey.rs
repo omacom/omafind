@@ -98,7 +98,7 @@ impl Survey {
             format!("{:.1} h", s / 3600.0)
         };
         format!(
-            "{} · about {time}{}",
+            "{} · ~{time}{}",
             parts.join(", "),
             if self.truncated { " or more" } else { "" }
         )

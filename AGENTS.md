@@ -24,7 +24,9 @@ Hyprland keeps its window in the `special:omafind` workspace (packaging/hypr-win
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
 subscribes to omafindd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `omafind setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
 with cliclack prompts, systemd user unit, `~/.config/hypr/omafind.lua`), the same setup as a screen in the window (first run, or
-Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`downloadModels`), `omafind doctor`, `omafind eval`
+Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`downloadModels`; folders, code, power, desktop,
+model; Save stays disabled until something changes and leaving with changes asks; "Add a folder" goes through the
+desktop portal's chooser, `omafind-app/src/portal.rs`, which is flea on Omarchy), `omafind doctor`, `omafind eval`
 (recall@1/@5 over `evals/queries.json`), `omafind uninstall`, code index (`code:` prefix, separate `code.sqlite`,
 whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/omafind/engine).
 Notes with numbers: `docs/phase-0.md`.
