@@ -61,6 +61,51 @@ pub fn focus_window() -> Result<()> {
     dispatch(&format!("hl.dsp.focus({{ window = \"class:{APP_ID}\" }})"))
 }
 
+/// This process's window: its address and the workspace it is on.
+fn own_window() -> Result<(String, String)> {
+    let clients: serde_json::Value = serde_json::from_str(&command("j/clients")?)?;
+    let me = std::process::id() as i64;
+    let window = clients
+        .as_array()
+        .and_then(|c| {
+            c.iter()
+                .find(|c| c["pid"].as_i64() == Some(me) && c["class"] == APP_ID)
+        })
+        .context("our window isn't mapped yet")?;
+    Ok((
+        window["address"].as_str().unwrap_or_default().to_owned(),
+        window["workspace"]["name"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    ))
+}
+
+/// Whether the window lives in its special workspace, as the window rules put it. Before setup (no rules) it is an
+/// ordinary window, and hiding it means closing it.
+pub fn in_own_workspace() -> Result<bool> {
+    Ok(own_window()?.1 == format!("special:{WORKSPACE}"))
+}
+
+/// Moves a window opened before the window rules existed (the first run, from the app launcher) to where the rules
+/// would have put it, floating in the special workspace, and shows it there: from then on it behaves as it always will.
+pub fn adopt() -> Result<()> {
+    let (address, workspace) = own_window()?;
+    if workspace == format!("special:{WORKSPACE}") {
+        return Ok(());
+    }
+    dispatch(&format!(
+        "hl.dsp.window.float({{ window = \"address:{address}\", action = \"on\" }})"
+    ))?;
+    dispatch(&format!(
+        "hl.dsp.window.move({{ workspace = \"special:{WORKSPACE}\", follow = false, window = \"address:{address}\" }})"
+    ))?;
+    if !is_shown()? {
+        toggle()?;
+    }
+    Ok(())
+}
+
 /// Sizes this process's window to the monitor showing the omafind workspace (or the focused one) and centers it: about
 /// 60 % × 68 % of the usable area, never smaller than the layout needs nor wider than reads well.
 pub fn fit_window() -> Result<()> {
@@ -90,16 +135,7 @@ pub fn fit_window() -> Result<()> {
     }
     let width = (w * 0.6).clamp(900.0_f64.min(w - 40.0), 1400.0).round();
     let height = (h * 0.68).clamp(600.0_f64.min(h - 40.0), 960.0).round();
-    let clients: serde_json::Value = serde_json::from_str(&command("j/clients")?)?;
-    let me = std::process::id() as i64;
-    let address = clients
-        .as_array()
-        .and_then(|c| {
-            c.iter()
-                .find(|c| c["pid"].as_i64() == Some(me) && c["class"] == APP_ID)
-        })
-        .and_then(|c| c["address"].as_str().map(str::to_owned))
-        .context("our window isn't mapped yet")?;
+    let (address, _) = own_window()?;
     dispatch(&format!(
         "hl.dsp.window.resize({{ x = {width}, y = {height}, relative = false, window = \"address:{address}\" }})"
     ))?;

@@ -146,8 +146,9 @@ export function candidates(): Promise<Candidates>;
 export function pickFolder(): Promise<string | null>;
 /** What a folder holds and how long it would take, as `candidates` reports it. */
 export function surveyFolder(path: string, code: boolean): Promise<Folder>;
-/** Saves the folders and power settings, starts the daemon at login if needed, adds the Hyprland lines; answers with a summary. */
-export function applySetup(options: { folders: string[]; code: string[]; power: Power; hyprland: boolean; autostart: boolean }): Promise<string>;
+/** Saves the folders and power settings, starts the daemon at login if needed, writes ~/.config/hypr/omafind.lua (window
+ *  rules and autostart always, the keybinding when `shortcut`); answers with a summary. */
+export function applySetup(options: { folders: string[]; code: string[]; power: Power; shortcut: boolean }): Promise<string>;
 /** Downloads the model files that are missing; progress through `setupProgress()`. */
 export function downloadModels(): Promise<boolean>;
 export function setupProgress(): { message: string; fraction: number } | null;
@@ -211,6 +212,8 @@ enum Note {
     Theme,
     /// Host state the script reads changed: re-describe.
     Refresh,
+    /// Closed before it was ever set up: nothing keeps the process around.
+    Quit,
 }
 
 fn with_app<T>(f: impl FnOnce(&mut App) -> T) -> Result<T, HostError> {
@@ -604,12 +607,8 @@ fn omafind_module(shared: Shared) -> HostModule {
                 .into_iter()
                 .map(PathBuf::from)
                 .collect();
-            let hyprland = options
-                .and_then(|o| o.get("hyprland"))
-                .map(|v| matches!(v, HostValue::Bool(true)))
-                .unwrap_or(true);
-            let autostart = options
-                .and_then(|o| o.get("autostart"))
+            let shortcut = options
+                .and_then(|o| o.get("shortcut"))
                 .map(|v| matches!(v, HostValue::Bool(true)))
                 .unwrap_or(true);
             let power = options.and_then(|o| o.get("power")).map(|p| {
@@ -646,8 +645,11 @@ fn omafind_module(shared: Shared) -> HostModule {
                             omafind_setup::start_daemon(&omafindd)?;
                             done.push("daemon started".into());
                         }
-                        if omafind_setup::install_hyprland(hyprland, hyprland, autostart)? {
+                        if omafind_setup::install_hyprland(shortcut)? {
                             done.push("Hyprland set up".into());
+                        }
+                        if let Err(error) = hypr::adopt() {
+                            tracing::warn!("adopt: {error:#}");
                         }
                         Ok::<String, anyhow::Error>(done.join(", "))
                     })
@@ -982,10 +984,14 @@ fn omafind_module(shared: Shared) -> HostModule {
         })
 }
 
-/// Closes the special workspace if it is open. Off a thread: Hyprland answers in a few ms, but never block a frame.
+/// Closes the special workspace if it is open; an ordinary window (opened from the launcher before setup added the
+/// window rules) has nothing to hide into, so the app quits. Off a thread: Hyprland answers in a few ms, but never
+/// block a frame.
 fn hide_window() {
     std::thread::spawn(|| {
-        if hypr::is_shown().unwrap_or(false)
+        if matches!(hypr::in_own_workspace(), Ok(false)) {
+            note(Note::Quit);
+        } else if hypr::is_shown().unwrap_or(false)
             && let Err(error) = hypr::toggle()
         {
             tracing::warn!("hide: {error:#}");
@@ -1265,6 +1271,7 @@ fn main() {
                                 refresh = false;
                             }
                             Note::Refresh => {}
+                            Note::Quit => cx.quit(),
                             Note::Theme => match theme::Palette::load() {
                                 Ok(palette) => {
                                     tracing::info!("theme changed: retinting");

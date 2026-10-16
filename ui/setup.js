@@ -25,8 +25,7 @@ export class Setup {
     this.folders = [];
     this.code = [];
     this.power = { pauseInPowerSaver: true, waitForAc: false };
-    this.hyprland = true;
-    this.autostart = true;
+    this.shortcut = true;
     this.textModel = true;
     this.mediaModel = true;
     this.configured = false;
@@ -38,6 +37,10 @@ export class Setup {
     /** Leaving with unsaved changes: { then(cx) } runs after Save or Discard. */
     this.confirm = null;
     this.saved = "";
+    /** Sections shown, for the onboarding's steps; null = all (settings). */
+    this.only = null;
+    this.headings = true;
+    this.downloading = false;
     this.scroll = VirtualListScrollHandle.new();
   }
 
@@ -56,10 +59,10 @@ export class Setup {
         this.indexBytes = c.indexBytes;
         this.textModel = c.textModel;
         this.mediaModel = c.mediaModel;
-        // Offered ticked on a first run; in settings, only what the user ticks is installed.
-        this.hyprland = !c.configured && !(c.binding && c.rules);
-        this.autostart = !c.configured && !c.autostart;
-        this.installed = { binding: c.binding, rules: c.rules, autostart: c.autostart };
+        // Offered ticked on a first run; in settings, only added when ticked. (The window rules and autostart always go
+        // in; the shortcut is the only choice.)
+        this.shortcut = !c.configured && !c.binding;
+        this.installed = { binding: c.binding };
         this.error = null;
       } catch (error) {
         this.error = String(error);
@@ -74,7 +77,7 @@ export class Setup {
   /** Everything Save writes, to tell whether anything changed. */
   snapshot() {
     const on = (list) => list.filter((f) => f.selected).map((f) => f.path).sort();
-    return JSON.stringify([on(this.folders), on(this.code), this.power, this.hyprland, this.autostart]);
+    return JSON.stringify([on(this.folders), on(this.code), this.power, this.shortcut]);
   }
 
   dirty() {
@@ -83,7 +86,7 @@ export class Setup {
 
   /** Save is offered when it would do something: a change, or on a first run, a start. */
   canSave(firstRun) {
-    if (this.loading || this.busy) return false;
+    if (this.loading || this.busy || this.downloading) return false;
     return firstRun || this.dirty();
   }
 
@@ -96,10 +99,9 @@ export class Setup {
     rows.push({ kind: "add", section: "code", code: true });
     rows.push({ kind: "powerSaver", section: "power" });
     rows.push({ kind: "charger", section: "power" });
-    rows.push({ kind: "hyprland", section: "desktop" });
-    rows.push({ kind: "autostart", section: "desktop" });
+    rows.push({ kind: "shortcut", section: "desktop" });
     rows.push({ kind: "models", section: "model" });
-    return rows;
+    return this.only ? rows.filter((r) => this.only.includes(r.section)) : rows;
   }
 
   /** The list, flat: section headings and rows, each with its height, rows numbered as `rows()` does. */
@@ -107,7 +109,7 @@ export class Setup {
     const out = [];
     let section = null;
     this.rows().forEach((r, i) => {
-      if (r.section !== section) {
+      if (r.section !== section && this.headings !== false) {
         section = r.section;
         out.push({ kind: "section", label: SECTIONS.find((s) => s.key === section).title, height: out.length ? 40 : 30 });
       }
@@ -138,8 +140,7 @@ export class Setup {
       case "code": this.code[row.index].selected = !this.code[row.index].selected; break;
       case "powerSaver": this.power = { ...this.power, pauseInPowerSaver: !this.power.pauseInPowerSaver }; break;
       case "charger": this.power = { ...this.power, waitForAc: !this.power.waitForAc }; break;
-      case "hyprland": if (!this.has("hyprland")) this.hyprland = !this.hyprland; break;
-      case "autostart": if (!this.has("autostart")) this.autostart = !this.autostart; break;
+      case "shortcut": if (!this.has("shortcut")) this.shortcut = !this.shortcut; break;
       case "add": this.add(row.code, cx); return;
       case "models": if (!this.textModel || !this.mediaModel) this.download(cx); return;
     }
@@ -149,7 +150,7 @@ export class Setup {
   has(what) {
     const i = this.installed;
     if (!i) return false;
-    return what === "hyprland" ? i.binding && i.rules : i.autostart;
+    return what === "shortcut" ? i.binding : false;
   }
 
   /** Asks the desktop for a folder and adds it, ticked, with what it holds. */
@@ -178,9 +179,10 @@ export class Setup {
     });
   }
 
+  /** Its own flag rather than `busy`: folders can be picked while it runs. */
   download(cx) {
-    if (this.busy) return;
-    this.busy = "download";
+    if (this.downloading) return;
+    this.downloading = true;
     cx.spawn(async (cx) => {
       try {
         await downloadModels();
@@ -190,7 +192,7 @@ export class Setup {
       } catch (error) {
         this.error = String(error);
       }
-      this.busy = null;
+      this.downloading = false;
       cx.notify();
     });
     cx.notify();
@@ -214,7 +216,7 @@ export class Setup {
     this.busy = "apply";
     cx.spawn(async (cx) => {
       try {
-        const message = await applySetup({ folders, code, power: this.power, hyprland: this.hyprland, autostart: this.autostart });
+        const message = await applySetup({ folders, code, power: this.power, shortcut: this.shortcut });
         this.error = null;
         this.message = message;
         this.busy = null;
@@ -459,19 +461,17 @@ export class Setup {
           return row(it.row, 46, "Pause in power-saver mode", "Search keeps working", this.power.pauseInPowerSaver ? CHECK_ON : CHECK_OFF, null, toggle, !this.power.pauseInPowerSaver);
         case "charger":
           return row(it.row, 46, "Only index on a charger", "Waits while on battery", this.power.waitForAc ? CHECK_ON : CHECK_OFF, null, toggle, !this.power.waitForAc);
-        case "hyprland": {
-          const have = this.has("hyprland");
-          return row(it.row, 46, "SUPER + CTRL + G opens Omafind", have ? "Keybinding and window rules are in ~/.config/hypr/omafind.lua" : "Adds a keybinding and window rules to ~/.config/hypr/omafind.lua", have ? "\u{f00c}" : this.hyprland ? CHECK_ON : CHECK_OFF, have ? { text: "installed", color: c.muted_foreground } : null, toggle, !have && !this.hyprland);
-        }
-        case "autostart": {
-          const have = this.has("autostart");
-          return row(it.row, 46, "Start with the session", have ? "In ~/.config/hypr/omafind.lua" : "Keeps the window ready so it opens instantly", have ? "\u{f00c}" : this.autostart ? CHECK_ON : CHECK_OFF, have ? { text: "installed", color: c.muted_foreground } : null, toggle, !have && !this.autostart);
+        case "shortcut": {
+          const have = this.has("shortcut");
+          const label = firstRun ? "Add the shortcut" : "SUPER + CTRL + G opens Omafind";
+          const caption = have ? "In ~/.config/hypr/omafind.lua" : firstRun ? "SUPER + CTRL + G, in ~/.config/hypr/omafind.lua" : "Adds it to ~/.config/hypr/omafind.lua";
+          return row(it.row, 46, label, caption, have ? "\u{f00c}" : this.shortcut ? CHECK_ON : CHECK_OFF, have ? { text: "installed", color: c.muted_foreground } : null, toggle, !have && !this.shortcut);
         }
         case "models": {
           const missing = !this.textModel || !this.mediaModel;
-          const caption = progress ? progress.message : this.busy === "download" ? "Downloading…" : missing ? "865 MB, once · stays on this machine" : "Text, image and audio encoders on this machine";
+          const caption = progress ? progress.message : this.downloading ? "Downloading…" : missing ? "865 MB, once · stays on this machine" : "Text, image and audio encoders on this machine";
           return v_flex().w_full()
-            .child(row(it.row, 46, missing ? (this.textModel ? "Image and audio encoders missing" : "Download the model files") : "EmbeddingGemma 2", caption, this.busy === "download" ? "\u{f110}" : missing ? "\u{f019}" : "\u{f00c}", missing ? null : { text: "installed", color: c.muted_foreground }, toggle, false))
+            .child(row(it.row, 46, missing ? (this.textModel ? "Image and audio encoders missing" : "Download the model files") : "EmbeddingGemma 2", caption, this.downloading ? "\u{f110}" : missing ? "\u{f019}" : "\u{f00c}", missing ? null : { text: "installed", color: c.muted_foreground }, toggle, false))
             .child(progress ? div().mx(12).h(3).rounded(2).bg(c.muted).child(div().h(3).w(`${Math.round(progress.fraction * 100)}%`).rounded(2).bg(c.primary)) : div());
         }
       }
@@ -531,7 +531,7 @@ export class Setup {
 }
 
 /** A bar button with its key: `kind` true = primary, "danger", false = plain; a disabled one is drawn faint and ignores clicks. */
-function button(label, keys, kind, enabled, run, cx) {
+export function button(label, keys, kind, enabled, run, cx) {
   const c = cx.theme().colors;
   const primary = kind === true && enabled;
   const danger = kind === "danger";

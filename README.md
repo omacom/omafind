@@ -17,10 +17,11 @@ From this checkout (an AUR package follows):
 ./install.sh
 ```
 
-That builds Omafind, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and runs `omafind setup`. Setup can also be
-done in the window itself: the first time it opens it asks which folders to index, downloads the model files
-(865 MB) and adds the keybinding, window rules and autostart line (`~/.config/hypr/omafind.lua`). `omafind doctor` checks
-everything afterwards; `omafind uninstall` takes it all out again. Ctrl+, in the window reopens the settings.
+That builds Omafind, fetches llama.cpp's prebuilt engine (30 MB, no compiling) and opens the window, which walks you
+through the rest: it downloads the model files (865 MB), asks which folders to index, and writes the window rules
+and autostart line to `~/.config/hypr/omafind.lua`, with the `SUPER + CTRL + G` shortcut if you want it. Opening Omafind from the app launcher does the same on a first
+run; `omafind setup` asks the same questions in a terminal. `omafind doctor` checks everything afterwards;
+`omafind uninstall` takes it all out again. Ctrl+, in the window opens the settings.
 
 ## Use
 

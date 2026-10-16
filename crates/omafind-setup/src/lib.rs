@@ -148,16 +148,14 @@ pub fn daemon_enabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Adds the keybinding, the window rules and the autostart line (`~/.config/hypr/omafind.lua`), and reloads Hyprland
-/// when anything changed.
-pub fn install_hyprland(binding: bool, rules: bool, autostart: bool) -> Result<bool> {
-    if !(binding || rules || autostart) {
-        return Ok(false);
-    }
+/// Writes `~/.config/hypr/omafind.lua` and reloads Hyprland when anything changed. The window rules and the autostart
+/// line always go in: without them the window is an ordinary tiled one and the first search waits for it to start.
+/// The keybinding is the one choice, since it takes a key from the user's own set.
+pub fn install_hyprland(shortcut: bool) -> Result<bool> {
     let changed = hypr::install(hypr::Parts {
-        binding,
-        rules,
-        autostart,
+        binding: shortcut,
+        rules: true,
+        autostart: true,
     })?;
     if changed {
         hypr::reload();

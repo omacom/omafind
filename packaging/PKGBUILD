@@ -20,6 +20,7 @@ sha256sums=('SKIP' 'SKIP')
 sha256sums_x86_64=('b70f9cc1b40ed1ebf5ba7d73b6b1585fd2c955e85acee954c24a1659f7b439e5')
 sha256sums_aarch64=('4d4192252556e27a848383a6cf1ae652ca4b8350ab6fffd4c5eff26f857d4db8')
 options=(!lto)
+install=omafind.install
 
 prepare() {
   # The engine prefix the build links against: upstream's libraries plus the matching headers.
@@ -48,7 +49,7 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/dist/omafind target/dist/omafindd target/dist/omafind-app -t "$pkgdir/usr/bin/"
-  install -Dm644 ui/gpui-shell.json ui/main.js ui/kinds.js ui/setup.js -t "$pkgdir/usr/share/omafind/ui/"
+  install -Dm644 ui/gpui-shell.json ui/*.js -t "$pkgdir/usr/share/omafind/ui/"
   install -Dm644 packaging/omafind.lua -t "$pkgdir/usr/share/omafind/hypr/"
   install -Dm644 systemd/omafindd.service -t "$pkgdir/usr/lib/systemd/user/"
   install -Dm644 packaging/omafind.desktop -t "$pkgdir/usr/share/applications/"

@@ -1,0 +1,4 @@
+post_install() {
+  echo "Open Omafind from the app launcher to set it up (model, folders, shortcut),"
+  echo "or run \`omafind setup\` in a terminal."
+}

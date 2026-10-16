@@ -23,10 +23,13 @@ untested (polkit refuses `powerprofilesctl` from an agent shell). Phase 5 (the w
 Hyprland keeps its window in the `special:omafind` workspace (packaging/hypr-window-rules.lua) and `omafind toggle` flips
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
 subscribes to omafindd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `omafind setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
-with cliclack prompts, systemd user unit, `~/.config/hypr/omafind.lua`), the same setup as a screen in the window (first run, or
-Ctrl+, / the footer gear: `ui/setup.js` over `candidates`/`applySetup`/`downloadModels`; folders, code, power, desktop,
-model; Save stays disabled until something changes and leaving with changes asks; "Add a folder" goes through the
-desktop portal's chooser, `omafind-app/src/portal.rs`, which is flea on Omarchy), `omafind doctor`, `omafind eval`
+with cliclack prompts, systemd user unit, `~/.config/hypr/omafind.lua`), and the same in the window, so the terminal is
+never needed: a first run (opened from the launcher, or by install.sh) is the onboarding, `ui/onboarding.js` (welcome,
+model download, folders, shortcut, then the indexing screen; the window, still an ordinary one without the rules, is
+floated into `special:omafind` once they are written, `hypr::adopt`, and closing it before setup quits the app); Ctrl+, /
+the footer gear is the settings screen, `ui/setup.js` over `candidates`/`applySetup`/`downloadModels` (folders, code,
+power, desktop, model; Save stays disabled until something changes and leaving with changes asks; "Add a folder" goes
+through the desktop portal's chooser, `omafind-app/src/portal.rs`, which is flea on Omarchy), `omafind doctor`, `omafind eval`
 (recall@1/@5 over `evals/queries.json`), `omafind uninstall`, code index (`code:` prefix, separate `code.sqlite`,
 whole-line stretches), `install.sh`, `packaging/PKGBUILD` (bundles the engine tarball into /usr/lib/omafind/engine).
 Notes with numbers: `docs/phase-0.md`.
@@ -67,8 +70,8 @@ crates/omafind-app       GPUI Shell host: window (app id `omafind`), `omafind` h
                      copy/hide), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs (colors.toml → tokens,
                      watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/omafind/thumbs), actions.rs
 ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
-packaging/           PKGBUILD, omafind.desktop, omafind.lua (what `omafind setup` writes to ~/.config/hypr/omafind.lua)
-install.sh           from-checkout install for one user, then `omafind setup`
+packaging/           PKGBUILD, omafind.install, omafind.desktop, omafind.lua (what `omafind setup` writes to ~/.config/hypr/omafind.lua)
+install.sh           from-checkout install for one user, then the window's onboarding (or `omafind setup` with flags)
 scripts/             fetch-engine.sh (prebuilt llama.cpp), fetch-models.sh
 evals/               make-testbed.sh; evals/testbed/ holds local test media (ignored)
 ```
@@ -155,6 +158,9 @@ before the rewrite). `omafind bench` at 300k synthetic chunks: quick stage 16 ms
   `pkill -x omafindd` kills the service too, and it stays dead: stop test processes by PID. A test `omafind-app` must be told
   `--ui ui/` (it prefers the installed `~/.local/share/omafind/ui`) and `OMAFIND_SOCKET` (the test daemon's socket), and
   `hyprctl dispatch` by window *address*, not `class:omafind`, which also matches the real window.
+- **Applying setup from a sandbox window** writes `omafind.lua` under the fake `$HOME` (window rules and autostart always,
+  the shortcut only when ticked) and so runs `hyprctl reload` on the real session the first time, and starts the daemon
+  through the real systemd user manager unless one already answers on the socket: run the sandbox daemon first.
 - **Driving the window with `wtype`**: Escape hides the workspace and the keyboard goes back to whatever the user
   was in, so keys typed after it land there. Check `hyprctl activewindow` first; never send Escape in a sequence.
 - **External-content FTS5 and triggers**: a migration that fills a column while its update trigger exists issues

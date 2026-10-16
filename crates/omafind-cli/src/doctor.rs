@@ -227,8 +227,18 @@ fn window() -> Vec<Check> {
         },
     ));
     let parts = hypr::installed();
+    // The shortcut is the user's choice; only its absence from a setup that wanted it would be a fault, and that
+    // can't be told apart, so it is reported, never failed.
+    checks.push(Check::new(
+        true,
+        "SUPER + CTRL + G keybinding",
+        if parts.binding {
+            "in ~/.config/hypr/omafind.lua"
+        } else {
+            "not added (settings or `omafind setup` add it)"
+        },
+    ));
     for (ok, what) in [
-        (parts.binding, "SUPER + CTRL + G keybinding"),
         (parts.rules, "window rules"),
         (parts.autostart, "omafind-app at login"),
     ] {

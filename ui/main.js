@@ -11,6 +11,7 @@ import { v_flex, h_flex, InputState, Input, VirtualListScrollHandle, v_virtual_l
 import { search, similar, recents, passage, lines, section, syntax, imageSize, thumb, status, open, reveal, copy, copyText, trash, hide } from "omafind";
 import { FILTERS, glyph, count, filterCount, tag, when, bytes, duration, marks, alpha, escapeMarkdown } from "./kinds.js";
 import { Setup } from "./setup.js";
+import { Onboarding } from "./onboarding.js";
 /** @import { AsyncContext, Context } from "gpui-kit" */
 /** @import { Result, Answer } from "omafind" */
 
@@ -60,6 +61,7 @@ export default class Omafind extends View {
     this.shown = status().shown;
     this.mode = "search";
     this.setup = new Setup();
+    this.onboarding = new Onboarding(this.setup);
     this.recents = null;
     this.historyAt = -1;
     this.menu = null; // { items, selected, confirm }
@@ -90,15 +92,21 @@ export default class Omafind extends View {
       this.firstRun = false;
       this.closeSetup(cx);
     };
-    this.setup.load(cx);
+    if (firstRun) this.onboarding.start(cx);
+    else {
+      this.setup.only = null;
+      this.setup.headings = true;
+      this.setup.load(cx);
+    }
     cx.notify();
     cx.timer.after(30, () => this.focus.focus());
   }
 
-  /** Esc, Back, the gear: out of setup, asking first when there are unsaved changes. A first run has nowhere to go
-   *  back to, so it hides the window (the screen and its choices stay for next time). */
+  /** Esc, Back, the gear: out of settings, asking first when there are unsaved changes. A first run has nowhere to go
+   *  back to: it hides the window, or closes it when it was opened before any setup (no window rules yet). */
   leaveSetup(cx) {
-    this.setup.leave(cx, (cx) => (this.firstRun ? hide() : this.closeSetup(cx)));
+    if (this.firstRun) hide();
+    else this.setup.leave(cx, (cx) => this.closeSetup(cx));
   }
 
   closeSetup(cx) {
@@ -107,11 +115,12 @@ export default class Omafind extends View {
     cx.notify();
   }
 
-  /** Moves the keyboard onto the search field: the root holds it, the field is the next tab stop. */
+  /** Moves the keyboard onto the search field: the root holds it, the field is the next tab stop. Setup screens have
+   *  no field; there the root keeps it, else focus moves on to nothing and keys go nowhere. */
   focusField(cx) {
     cx.timer.after(30, () => {
       this.focus.focus();
-      window.focus_next();
+      if (this.mode === "search") window.focus_next();
     });
   }
 
@@ -407,6 +416,17 @@ export default class Omafind extends View {
     const key = event.keystroke;
     if (this.mode === "setup") {
       const setup = this.setup;
+      if (this.firstRun) {
+        const onboarding = this.onboarding;
+        switch (key) {
+          case "escape": onboarding.back(cx, () => hide()); return;
+          case "enter": onboarding.next(cx, setup.onSaved); return;
+          case "down": case "ctrl-n": case "ctrl-j": case "tab": setup.move(1, cx); return;
+          case "up": case "ctrl-p": case "ctrl-k": case "shift-tab": setup.move(-1, cx); return;
+          case "space": if (setup.rows().length) setup.toggle(cx); return;
+        }
+        return;
+      }
       if (setup.confirm) {
         switch (key) {
           case "escape": setup.keepEditing(cx); return;
@@ -1157,9 +1177,12 @@ export default class Omafind extends View {
     else if (s.state === "starting") left = "Starting: watching your folders";
     else left = `${count(s.indexed)} files · up to date`;
     let hints;
-    if (this.mode === "setup") {
-      left = this.setup.footerNote(this.firstRun) ?? left;
-      hints = this.firstRun && !this.setup.confirm ? "↑↓ move · space toggle · ⏎ start · esc close" : this.setup.hints();
+    if (this.mode === "setup" && this.firstRun) {
+      left = this.onboarding.note();
+      hints = this.onboarding.hints();
+    } else if (this.mode === "setup") {
+      left = this.setup.footerNote(false) ?? left;
+      hints = this.setup.hints();
     }
     else if (this.menu) hints = "↑↓ move · ⏎ run · esc back";
     else if (this.results.length) hints = `${this.isGrid() ? "←↑↓→" : "↑↓"} move · ⏎ ${openVerb(this.results[this.selected])} · ⌃S similar · ⌃K actions · esc close`;
@@ -1217,9 +1240,12 @@ export default class Omafind extends View {
       .on_key_down((event, cx) => this.onKey(event, cx))
       .on_action("omafind_next", (_e, cx) => this.onKey({ keystroke: "tab" }, cx))
       .on_action("omafind_previous", (_e, cx) => this.onKey({ keystroke: "shift-tab" }, cx));
+    if (this.mode === "setup" && this.firstRun) {
+      return root.child(this.onboarding.render(cx, () => hide(), this.setup.onSaved)).child(this.footer(cx));
+    }
     if (this.mode === "setup") {
       return root
-        .child(this.setup.render(cx, this.firstRun, (cx) => this.leaveSetup(cx)))
+        .child(this.setup.render(cx, false, (cx) => this.leaveSetup(cx)))
         .child(this.footer(cx))
         .child(this.setup.confirm ? this.setup.dialog(cx, this.firstRun) : div());
     }

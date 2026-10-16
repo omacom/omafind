@@ -185,57 +185,35 @@ pub fn run(options: Options) -> Result<()> {
         }
     }
 
-    // 4. Hyprland: keybinding, window rules, autostart, in ~/.config/hypr/omafind.lua.
+    // 4. Hyprland, in ~/.config/hypr/omafind.lua: the window rules and autostart always, the shortcut if wanted.
     let have = hypr::installed();
-    let parts = [
-        (
-            "binding",
-            have.binding,
-            "SUPER + CTRL + G opens the search window",
-        ),
-        (
-            "rules",
-            have.rules,
-            "Window rules: floating, centred, in its own special workspace",
-        ),
-        (
-            "autostart",
-            have.autostart,
-            "Start the window with the session, so it opens instantly",
-        ),
-    ];
-    for (_, _, label) in parts.iter().filter(|(_, present, _)| *present) {
-        cliclack::log::success(format!("{label} (already in ~/.config/hypr/omafind.lua)"))?;
-    }
-    let absent: Vec<(&str, String, String)> = parts
-        .iter()
-        .filter(|(_, present, _)| !*present)
-        .map(|(key, _, label)| (*key, label.to_string(), String::new()))
-        .collect();
-    if !absent.is_empty() {
-        let on = absent.iter().map(|(k, _, _)| *k).collect();
-        let chosen = ui::choose(
-            "Add to ~/.config/hypr/omafind.lua:",
-            &absent,
-            on,
+    let shortcut = if have.binding {
+        cliclack::log::success(
+            "SUPER + CTRL + G opens Omafind (already in ~/.config/hypr/omafind.lua)",
+        )?;
+        true
+    } else {
+        ui::confirm(
+            "Add the SUPER + CTRL + G shortcut to open Omafind?",
             options.yes,
             WHAT,
+        )?
+    };
+    if !dry && omafind_setup::install_hyprland(shortcut)? {
+        cliclack::log::success(
+            "Window rules and autostart written to ~/.config/hypr/omafind.lua; Hyprland reloaded",
         )?;
-        if !dry {
-            let pick = |key: &str| chosen.contains(&key);
-            if omafind_setup::install_hyprland(pick("binding"), pick("rules"), pick("autostart"))? {
-                cliclack::log::success("Hyprland config written and reloaded")?;
-            }
-        }
     }
 
     // 5. The window, resident from now on.
     if !dry && omafind_setup::start_app(&std::env::current_exe()?.with_file_name("omafind-app"))? {
         cliclack::log::success("omafind-app started")?;
     }
-    cliclack::outro(
-        "Done. SUPER + CTRL + G searches; `omafind status` and `omafind doctor` say how it's going.",
-    )?;
+    cliclack::outro(if shortcut {
+        "Done. SUPER + CTRL + G searches; `omafind status` and `omafind doctor` say how it's going."
+    } else {
+        "Done. `omafind toggle` (or the app launcher) searches; `omafind status` and `omafind doctor` say how it's going."
+    })?;
     Ok(())
 }
 
