@@ -38,11 +38,21 @@ testbed:
 build:
     cargo build --release
 
-# The window with hot reload of ui/, against whichever daemon is running
+# The window (debug build), against whichever daemon is running
 dev:
-    cargo run -p omafind-app -- --dev --ui "$PWD/ui"
+    cargo run -p omafind-app
 
-# Install for this user (binaries, UI, desktop entry), then `omafind setup`
+# Build the Arch package from this checkout (packaging/omafind-*.pkg.tar.zst); install it with `sudo pacman -U`
+package:
+    #!/bin/bash
+    set -euo pipefail
+    ver=$(sed -n 's/^pkgver=//p' packaging/PKGBUILD)
+    # makepkg uses a source it already has: the working tree, laid out as the release tarball would be.
+    git ls-files -co --exclude-standard -z | tar --null -T - --transform "s,^,omafind-$ver/," -czf "packaging/omafind-$ver.tar.gz"
+    cd packaging && makepkg -f --cleanbuild
+    ls -1 "$PWD"/omafind-"$ver"-*.pkg.tar.zst
+
+# Install for this user (binaries, desktop entry), then set up in the window
 install *args:
     ./install.sh {{ args }}
 
@@ -113,14 +123,14 @@ sandbox folder: build
     echo "omafindd $(cat {{ sandbox }}/omafindd.pid) indexing {{ folder }}; log: $dir/omafindd.log"
     echo "CLI against it: OMAFIND_SOCKET=$dir/run/omafind.sock OMAFIND_INDEX=$dir/index.sqlite target/release/omafind status"
 
-# A dev window on the sandbox daemon (hot reload of ui/)
+# A dev window on the sandbox daemon
 sandbox-app:
     #!/bin/bash
     set -euo pipefail
     dir="$(readlink -f "{{ sandbox }}/current")"
     export OMAFIND_SOCKET="$dir/run/omafind.sock" XDG_CONFIG_HOME="$dir/config" OMAFIND_INDEX="$dir/index.sqlite"
     cargo build -p omafind-app
-    target/debug/omafind-app --dev --ui "$PWD/ui" &
+    target/debug/omafind-app &
     echo $! > "{{ sandbox }}/omafind-app.pid"
     echo "omafind-app $(cat {{ sandbox }}/omafind-app.pid) on $dir"
 
@@ -142,14 +152,14 @@ demo: build
     echo $! > "{{ sandbox }}/omafindd.pid"
     echo "omafindd $(cat {{ sandbox }}/omafindd.pid) on $home; log: {{ sandbox }}/demo.log"
 
-# The window (debug build, hot reload) on the `just demo` home
+# The window (debug build) on the `just demo` home
 demo-app:
     #!/bin/bash
     set -euo pipefail
     home="{{ sandbox }}/home"
     cargo build -p omafind-app
     HOME="$home" XDG_CONFIG_HOME="$home/.config" XDG_CACHE_HOME="$home/.cache" XDG_DATA_HOME="$home/.local/share" \
-      OMAFIND_SOCKET="$home/run/omafind.sock" target/debug/omafind-app --dev --ui "$PWD/ui" &
+      OMAFIND_SOCKET="$home/run/omafind.sock" target/debug/omafind-app &
     echo $! > "{{ sandbox }}/omafind-app.pid"
     echo "omafind-app $(cat {{ sandbox }}/omafind-app.pid) on $home"
 

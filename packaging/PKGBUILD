@@ -1,6 +1,7 @@
 # Maintainer: Taha Nejad <paprikataha@gmail.com>
 # Omafind: local semantic file search for Omarchy. Builds the Rust workspace and bundles llama.cpp's own prebuilt
 # release (no compiling of llama.cpp): the libraries land in /usr/lib/omafind/engine, the headers only serve the build.
+# From a checkout, `just package` builds this with the working tree standing in for the release tarball.
 pkgname=omafind
 pkgver=0.0.1
 pkgrel=1
@@ -19,7 +20,8 @@ source_aarch64=("https://github.com/ggml-org/llama.cpp/releases/download/$_llama
 sha256sums=('SKIP' 'SKIP')
 sha256sums_x86_64=('b70f9cc1b40ed1ebf5ba7d73b6b1585fd2c955e85acee954c24a1659f7b439e5')
 sha256sums_aarch64=('4d4192252556e27a848383a6cf1ae652ca4b8350ab6fffd4c5eff26f857d4db8')
-options=(!lto)
+# Cargo's dist profile does its own LTO and stripping; there is nothing left for a debug package.
+options=(!lto !debug)
 install=omafind.install
 
 prepare() {
@@ -49,7 +51,6 @@ check() {
 package() {
   cd "$pkgname-$pkgver"
   install -Dm755 target/dist/omafind target/dist/omafindd target/dist/omafind-app -t "$pkgdir/usr/bin/"
-  install -Dm644 ui/gpui-shell.json ui/*.js -t "$pkgdir/usr/share/omafind/ui/"
   install -Dm644 packaging/omafind.lua -t "$pkgdir/usr/share/omafind/hypr/"
   install -Dm644 systemd/omafindd.service -t "$pkgdir/usr/lib/systemd/user/"
   install -Dm644 packaging/omafind.desktop -t "$pkgdir/usr/share/applications/"

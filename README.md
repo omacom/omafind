@@ -40,8 +40,8 @@ run; `omafind setup` asks the same questions in a terminal. `omafind doctor` che
 EmbeddingGemma 2 (text, vision and audio in one 768-dimension space) runs on llama.cpp with Vulkan, CUDA or the CPU.
 `omafindd` watches the chosen folders, reads what changed (poppler, tesseract, ffmpeg, all already on Omarchy), embeds it
 in a worker that exits when the queue is empty, and answers searches over a socket: nearest vectors plus exact
-keywords (FTS5), fused and gated so only matches that stand out are shown. `omafind-app` is a GPUI Shell window whose UI
-is a small JavaScript file you can restyle. Developer notes are in [AGENTS.md](AGENTS.md).
+keywords (FTS5), fused and gated so only matches that stand out are shown. `omafind-app` is a native GPUI Kit window that follows
+your Omarchy theme. Developer notes are in [AGENTS.md](AGENTS.md).
 
 ## Credits
 

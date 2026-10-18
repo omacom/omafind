@@ -24,10 +24,10 @@ Hyprland keeps its window in the `special:omafind` workspace (packaging/hypr-win
 that workspace (≈12 ms), like Omarchy's scratchpad console. The app follows Hyprland's event socket for shown/hidden,
 subscribes to omafindd for status, retints live from Omarchy's colors.toml, and shows thumbnails made on demand. Phase 6: `omafind setup` (models downloaded in Rust with resume + SHA-256, folder picker with counts and time estimates
 with cliclack prompts, systemd user unit, `~/.config/hypr/omafind.lua`), and the same in the window, so the terminal is
-never needed: a first run (opened from the launcher, or by install.sh) is the onboarding, `ui/onboarding.js` (welcome,
+never needed: a first run (opened from the launcher, or by install.sh) is the onboarding (welcome,
 model download, folders, shortcut, then the indexing screen; the window, still an ordinary one without the rules, is
 floated into `special:omafind` once they are written, `hypr::adopt`, and closing it before setup quits the app); Ctrl+, /
-the footer gear is the settings screen, `ui/setup.js` over `candidates`/`applySetup`/`downloadModels` (folders, code,
+the footer gear is the settings screen, both in `omafind-app/src/settings.rs` (folders, code,
 power, desktop, model; Save stays disabled until something changes and leaving with changes asks; "Add a folder" goes
 through the desktop portal's chooser, `omafind-app/src/portal.rs`, which is flea on Omarchy), `omafind doctor`, `omafind eval`
 (recall@1/@5 over `evals/queries.json`), `omafind uninstall`, code index (`code:` prefix, separate `code.sqlite`,
@@ -66,10 +66,12 @@ crates/omafindd          daemon: coordinator (daemon.rs), worker child (worker.r
 crates/omafind-cli       `omafind index|search|status|pause|resume|watch|toggle|setup|doctor|eval|bench|uninstall`
                      (setup.rs, doctor.rs, eval.rs, download.rs, hypr.rs; through omafindd when it runs, else in-process)
 systemd/omafindd.service user unit: Nice=10, IOSchedulingClass=idle, CPUWeight=20, MemoryHigh=3G
-crates/omafind-app       GPUI Shell host: window (app id `omafind`), `omafind` host module (search/thumb/status/open/reveal/
-                     copy/hide), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs (colors.toml → tokens,
-                     watched), thumbs.rs (ffmpegthumbnailer/pdftoppm → ~/.cache/omafind/thumbs), actions.rs
-ui/                  QuickJS UI scripts (gpui-shell.json, main.js, kinds.js); gpui-kit.d.ts is generated, not committed
+crates/omafind-app       the window, native GPUI Kit (app id `omafind`): search.rs (the view: state, keys, async searches),
+                     results.rs (bar, filters, rows, grid, Ctrl+K menu), preview.rs, home.rs (empty screens, footer),
+                     settings.rs (onboarding + settings, an entity), widgets.rs, format.rs (text helpers),
+                     service.rs (blocking calls: daemon, surveys, setup, download), state.rs (AppState global the
+                     daemon/Hyprland threads update), hypr.rs (Lua dispatchers over the IPC sockets), theme.rs
+                     (colors.toml → GPUI Component theme, watched), actions.rs (open/reveal/copy/trash), portal.rs
 packaging/           PKGBUILD, omafind.install, omafind.desktop, omafind.lua (what `omafind setup` writes to ~/.config/hypr/omafind.lua)
 THIRD_PARTY_NOTICES.md  the model (EmbeddingGemma 2, Google DeepMind, Apache-2.0) and llama.cpp (MIT): keep it in step with
                      the pins; the package installs it under /usr/share/licenses/omafind
@@ -100,9 +102,8 @@ Consequences to design for:
   `embeddinggemma-2-Q8_0.gguf` (309,855,456 B) and `mmproj-embeddinggemma-2-Q8_0.gguf` (554,821,024 B); SHA-256s in
   `scripts/fetch-models.sh`. Installed to `~/.local/share/omafind/models` (`$OMAFIND_MODELS` overrides). Never the F16 files:
   activations overflow float16. The model revision is pinned because it defines the vectors; the engine is not.
-- GPUI Kit / GPUI Shell is a Cargo git dependency pinned at `50dac1cafb34a4d453c92715219c0458d9a4727b` (v0.7.3 line,
-  shell milestone M0, not on crates.io, API expected to change). A PKGBUILD vendors Cargo deps as usual. Keep every
-  host-module/runtime call inside `crates/omafind-app`.
+- GPUI Kit is a Cargo git dependency pinned at `50dac1cafb34a4d453c92715219c0458d9a4727b` (v0.7.3 line, not on
+  crates.io, API expected to change). A PKGBUILD vendors Cargo deps as usual. Only `crates/omafind-app` depends on it.
 - Prompts (model card): query `task: search result | query: <text>`, code query `task: code retrieval | query:`,
   document `title: <title or none> | text: <text>`. Media inputs take no prompt. Mean pooling, L2-normalized.
 
@@ -119,13 +120,13 @@ scripts/fetch-models.sh            # resumable, size + SHA-256 checked; reuses t
 cargo build --release -p omafind-embed && cargo build -p omafind-app
 cargo run --release -p omafind-embed --bin embed-spike -- demo [--cpu]
 cargo run --release -p omafind-embed --bin embed-spike -- golden evals/reference [--write]
-cargo run -p omafind-app -- --dev      # hot-reloads ui/ on save, writes ui/gpui-kit.d.ts
+cargo run -p omafind-app      # the window, against whichever daemon runs
 cargo nextest run --release   # or `just test`; nextest skips doctests: cargo test --doc
 ```
 
 Installs and the package build with `--profile dist` (Cargo.toml): fat LTO, one codegen unit, stripped, third-party
-crates at `opt-level = "z"` except the hot ones (QuickJS, GPUI's renderer, SQLite, image decoders); our crates stay at
-3. omafind-app goes from 80 MB (release, stripped) to about 45 MB. It takes ~10 minutes, so it isn't the everyday build;
+crates at `opt-level = "z"` except the hot ones (GPUI's renderer, SQLite, image decoders); our crates stay at
+3. It takes ~10 minutes, so it isn't the everyday build;
 compare `omafind bench` between the two after touching it.
 
 `sudo` needs a password in agent sessions: ask the user to install packages. Already on Omarchy: `ffmpeg`,
@@ -158,7 +159,7 @@ before the rewrite). `omafind bench` at 300k synthetic chunks: quick stage 16 ms
 
 - **The real daemon and window run on this machine** (`omafindd.service`, `omafind-app` in `special:omafind`). AGENTS' old
   `pkill -x omafindd` kills the service too, and it stays dead: stop test processes by PID. A test `omafind-app` must be told
-  `--ui ui/` (it prefers the installed `~/.local/share/omafind/ui`) and `OMAFIND_SOCKET` (the test daemon's socket), and
+  `OMAFIND_SOCKET` (the test daemon's socket), and
   `hyprctl dispatch` by window *address*, not `class:omafind`, which also matches the real window.
 - **Applying setup from a sandbox window** writes `omafind.lua` under the fake `$HOME` (window rules and autostart always,
   the shortcut only when ticked) and so runs `hyprctl reload` on the real session the first time, and starts the daemon
@@ -186,11 +187,7 @@ before the rewrite). `omafind bench` at 300k synthetic chunks: quick stage 16 ms
 - A `.gitignore` in a parent folder (a dotfiles repo in `$HOME` with `*`) would hide everything: the crawler honours
   gitignore only inside git repositories (`require_git(true)`), and inside those only screenshots are read anyway.
 
-- **gpui-kit through git needs two extra steps**, both documented in `Cargo.toml`: repeat its
-  `[patch.crates-io] rquickjs = { git = …gpui-kit, rev = … }` (its workspace patch to `crates/shell/rquickjs-compat`
-  is not inherited), and keep `pkcs1 0.8.0-rc.4` / `rsa 0.10.0-rc.18` in `Cargo.lock` (newer prereleases break
-  LLRT's crypto module). If `cargo update` touches those, re-pin with `cargo update -p <crate>@<ver> --precise <ver>`.
-- `[profile.dev.package]` sets `opt-level = 3` for `quickjs-jit-*` and `gpui-pre*`, else script renders run ~3× slower.
+- `[profile.dev.package]` sets `opt-level = 3` for `gpui-pre*`, else a debug window is slow to the eye.
 - `llama-cpp-2` / `llama-cpp-sys-2` (checked 0.1.159, 2026-10-07) do wrap `mtmd` and have `system-ggml` and
   `dynamic-backends` features, but the llama.cpp they bundle is ggml 0.24 era: before EmbeddingGemma 2 (b11452+), no
   `llama_batch_ext`/`llama_process`, and incompatible with Arch's ggml 0.26. They also compile llama.cpp inside cargo
@@ -213,26 +210,27 @@ when closed. Omafind's rules, binding and autostart live in one file, `~/.config
 `hypr.bindings` and `hypr.autostart` but not every version loads a `windows.lua`, so a file of our own with its own
 require is the only arrangement that works everywhere. `omafind uninstall` removes both.
 
-## GPUI Shell notes for the UI (Phase 5)
+## GPUI Kit notes for the window
 
-- Host modules are call-only: `HostModule::new("omafind").function(...)/.async_function(...)/.declarations(ts)`,
-  `export_module` before `ShellRuntime::new_with_components`. Scripts `import { search } from "omafind"`. Values are
-  null/bool/number/string/array/object (`HostObject::new().field(..)`). No host → script push: use
-  `runtime.refresh(&root, cx)` after host state changes, or a long-poll async function.
-- Nothing holds keyboard focus when the window opens; the root View calls `this.focus.focus()` then
-  `window.focus_next()` (a tick later) to land on the `Input`. Done again on every show.
-- `image(path)` only serves the application directory; `omafind-app` installs its own `AssetSource` that also serves
-  absolute paths under `~/.cache/omafind/thumbs`. `uniform_list` ignores `track_scroll`; `v_virtual_list` (gpui-base)
-  with a fixed row height takes a `VirtualListScrollHandle` and `scroll_to_item`.
-- Modules: `div`, `image`, `svg`, style methods from `gpui-kit`; `v_flex`, `h_flex`, `Input`, `InputState`,
-  `v_virtual_list`, `VirtualListScrollHandle` from `gpui-base`. The generated `ui/gpui-kit.d.ts` is the reference.
-- Anything that must outlive the `application().run(...)` closure (watchers) must be leaked or stored globally:
-  the closure runs once and drops its captures.
-- Keystroke spelling is GPUI's: `escape`, `down`, `enter`, `ctrl-n`. Handle keys once (root `on_key_down`); an
-  `InputState` `submit` hook as well fires Enter twice.
-- `hide` closes the special workspace through Hyprland; the process and window stay.
-- Theme tokens: `cx.theme().colors.{background,foreground,surface,border,input,muted,muted_foreground,primary,…}`.
-- Set `tracing` filter `omafind_app=info,gpui_shell=info,gpui_kit::shell::script=info` to see script errors.
+The UI was QuickJS scripts on GPUI Shell until 2026-10-17; it is now Rust, drawn to the design canvas in exact pixels
+(not rem steps: the canvas and Omarchy's panels are pixel designs). GPUI Kit's agent guide (`../gpui-kit/skills/gpui-kit`)
+holds the coding rules; read it before structural changes.
+
+- `gpui_kit::init` first, then `theme::Palette::apply`, then `gpui_kit::open_window` (wraps the view in `Root`).
+- Colors: `widgets::colors(cx)` = gpui-base's semantic tokens, which GPUI Component's theme projects (`popover` is the
+  surface, `danger` the destructive color). Write the theme only through `Theme::update` (`theme.rs`), never the base
+  global, or the next sync undoes it.
+- The search field is GPUI Component's `Input` (Styled, `.token()` renders the filter chips, `.focus_bordered(false)` or
+  it draws a focus ring the design doesn't have). Chip ranges are UTF-8 byte ranges.
+- Keys: the root `on_key_down` matches `keystroke.unparse()` strings (`ctrl-shift-c`, `escape`); Tab/Shift+Tab are
+  actions bound in the `Omafind` key context, or focus traversal takes them. The setup entity gets keys forwarded.
+- Bar buttons are gpui-base's unstyled `Button` with `focusable(false)`: clicking one leaves the keyboard on the field.
+- Searches are numbered; an answer older than the one shown is dropped (two filters' searches can finish out of order).
+- Async: `cx.spawn` + `cx.background_spawn(service::…)` for anything blocking; never block the main thread.
+- Rust 2024 captures argument lifetimes in `impl IntoElement` returns: helpers that take references return
+  `AnyElement`.
+- Anything that must outlive the `application().run(...)` closure (watchers) must be leaked or stored globally.
+- `hide_window` closes the special workspace through Hyprland; the process and window stay.
 
 ## Running the daemon in isolation (tests)
 
@@ -254,7 +252,7 @@ The tool shell has no Wayland env. Before launching anything graphical:
 export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1)
 ```
 
-Then `./target/debug/omafind-app --dev --ui $PWD/ui &`, `hyprctl clients -j` (class `omafind`), `hyprctl dispatch focuswindow class:omafind`,
+Then `./target/debug/omafind-app &`, `hyprctl clients -j` (class `omafind`), `hyprctl dispatch focuswindow class:omafind`,
 `wtype -k Tab; wtype 'query'`, `grim -o eDP-1 shot.png` (3840×2160, scale 1.6), stop it by PID (`pkill -x omafind-app` also closes the real window). Never
 `pkill -f`: it matches the tool's own shell.
 

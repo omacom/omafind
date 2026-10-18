@@ -2,5 +2,8 @@ target/
 evals/testbed/
 PLAN.md
 docs/
-ui/gpui-kit.d.ts
-ui/node_modules/
+# makepkg's sources, build tree and package (`just package`)
+packaging/*.tar.gz
+packaging/*.pkg.tar.zst
+packaging/src/
+packaging/pkg/

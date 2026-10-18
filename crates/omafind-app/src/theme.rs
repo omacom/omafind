@@ -1,12 +1,12 @@
-//! Omarchy's palette onto gpui-base's semantic tokens, live: `colors.toml` is read at start and whenever the theme
+//! Omarchy's palette onto the GPUI Kit theme, live: `colors.toml` is read at start and whenever the theme
 //! changes (the `current/theme` link is replaced by `omarchy-theme-set`, so the parent is watched), and the font is
 //! whatever `fc-match monospace` says, as the rest of Omarchy does.
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use gpui_kit::base::{Theme, ThemeAppearance};
-use gpui_kit::{App, Hsla, Rgba, px};
+use gpui_kit::component::{Theme, ThemeMode};
+use gpui_kit::{App, Global, Hsla, Rgba, px};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Palette {
@@ -24,8 +24,14 @@ pub struct Palette {
     pub green: Hsla,
 }
 
-/// Colors the scripts need beyond gpui-base's roles: numbers and strings in code previews, as `#rrggbb`.
-pub static SYNTAX: std::sync::Mutex<Option<(String, String)>> = std::sync::Mutex::new(None);
+/// Colors code previews need beyond the semantic roles: numbers and strings, from the theme's yellow and green.
+#[derive(Debug, Clone, Copy)]
+pub struct Syntax {
+    pub number: Hsla,
+    pub string: Hsla,
+}
+
+impl Global for Syntax {}
 
 pub fn state_dir() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state/omarchy/current")
@@ -101,54 +107,51 @@ impl Palette {
         Self::parse(&text, state_dir().join("theme/light.mode").exists())
     }
 
-    /// The gpui-base tokens this palette maps onto. Same mapping as Omarchy's own menu: rows on `background`,
-    /// text in `foreground`, the selected row `foreground` at 8 % with the title in `accent`, dividers in `muted`.
+    /// The theme colors this palette maps onto. Same mapping as Omarchy's own menu: rows on `background`, text in
+    /// `foreground`, the selected row `foreground` at 8 % with the title in `accent`, dividers in `muted`. Written to
+    /// GPUI Component's theme, which projects them onto the semantic tokens (`popover` is the surface, `danger` the
+    /// destructive color) that the views and gpui-base read.
     pub fn apply(&self, font: &str, cx: &mut App) {
-        let theme = Theme::global_mut(cx);
-        theme.appearance = if self.light {
-            ThemeAppearance::Light
+        let mode = if self.light {
+            ThemeMode::Light
         } else {
-            ThemeAppearance::Dark
+            ThemeMode::Dark
         };
-        let c = &mut theme.tokens.colors;
-        c.background = self.background;
-        c.foreground = self.foreground;
-        c.surface = self.lighter_background;
-        c.surface_foreground = self.foreground;
-        c.primary = self.accent;
-        c.primary_foreground = self.background;
-        c.secondary = self.lighter_background;
-        c.secondary_foreground = self.foreground;
-        c.muted = self.selection;
-        c.muted_foreground = self.muted_foreground;
-        c.accent = self.selected_row();
-        c.accent_foreground = self.selected_title();
-        c.destructive = self.red;
-        c.destructive_foreground = self.background;
-        c.border = self.muted;
-        c.input = self.muted;
-        c.ring = self.accent;
-        c.selection = self.selection;
-        *SYNTAX.lock().unwrap() = Some((to_hex(self.yellow), to_hex(self.green)));
-        let t = &mut theme.tokens.typography;
-        t.sans = font.to_owned().into();
-        t.mono = font.to_owned().into();
-        for (style, size) in [
-            (&mut t.xs, 11.0),
-            (&mut t.sm, 12.0),
-            (&mut t.md, 13.0),
-            (&mut t.lg, 15.0),
-            (&mut t.xl, 18.0),
-            (&mut t.mono_md, 13.0),
-        ] {
-            style.size = px(size);
-            style.line_height = px(size * 1.4);
+        // Switching mode loads that mode's registered theme over the colors, so it goes first, on its own.
+        if Theme::global(cx).mode != mode {
+            Theme::change(mode, None, cx);
         }
-        let r = &mut theme.tokens.radius;
         let rounding = hyprland_rounding() as f32;
-        r.sm = px(rounding.min(4.0));
-        r.md = px(rounding.min(8.0));
-        r.lg = px(rounding);
+        Theme::update(cx, |theme| {
+            let c = &mut theme.colors;
+            c.background = self.background;
+            c.foreground = self.foreground;
+            c.popover = self.lighter_background;
+            c.popover_foreground = self.foreground;
+            c.primary = self.accent;
+            c.primary_foreground = self.background;
+            c.secondary = self.lighter_background;
+            c.secondary_foreground = self.foreground;
+            c.muted = self.selection;
+            c.muted_foreground = self.muted_foreground;
+            c.accent = self.selected_row();
+            c.accent_foreground = self.selected_title();
+            c.danger = self.red;
+            c.danger_foreground = self.background;
+            c.border = self.muted;
+            c.input = self.muted;
+            c.ring = self.accent;
+            c.selection = self.selection;
+            c.caret = self.foreground;
+            theme.font_family = font.to_owned().into();
+            theme.mono_font_family = font.to_owned().into();
+            theme.radius = px(rounding.min(8.0));
+            theme.radius_lg = px(rounding);
+        });
+        cx.set_global(Syntax {
+            number: self.yellow,
+            string: self.green,
+        });
     }
 }
 
@@ -167,12 +170,6 @@ impl Palette {
             self.foreground
         }
     }
-}
-
-fn to_hex(color: Hsla) -> String {
-    let c: Rgba = color.into();
-    let byte = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
-    format!("#{:02x}{:02x}{:02x}", byte(c.r), byte(c.g), byte(c.b))
 }
 
 /// `a` towards `b` by `t`.

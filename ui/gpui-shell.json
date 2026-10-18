@@ -1,9 +1,0 @@
-{
-  "id": "io.github.omacom.omafind",
-  "name": "Omafind",
-  "version": "0.0.1",
-  "shell-version": "0.7.3",
-  "entry": "main.js",
-  "window": { "width": 880, "height": 600 },
-  "capabilities": { "storage": false }
-}

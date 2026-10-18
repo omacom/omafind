@@ -1,6 +1,6 @@
 [package]
 name = "omafind-app"
-description = "The Omafind search window: a GPUI Shell host running the QuickJS UI in ui/."
+description = "The Omafind search window, in GPUI Kit."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -14,10 +14,12 @@ omafind-index = { path = "../omafind-index" }
 omafind-embed = { path = "../omafind-embed" }
 omafind-extract = { path = "../omafind-extract" }
 gpui-kit.workspace = true
-gpui-shell.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
 toml = "0.9"
+regex = "1"
+jiff = "0.2"
+futures = "0.3"
 notify = "8"
 # The desktop portal's folder chooser.
 zbus = "5"

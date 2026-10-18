@@ -486,6 +486,12 @@ impl Coordinator {
                 let (_, changed) = store.see_file(&c.path, c.mtime, c.size as i64, c.kind)?;
                 pending += changed as usize;
                 keep.insert(c.path.clone());
+                // A first crawl of a big home takes minutes: say how many files it has found, as indexing does.
+                if self.last_status.elapsed().as_millis() >= 250 {
+                    self.last_status = Instant::now();
+                    let now = status(&self.shared, &self.store, &self.code_store, &self.searcher)?;
+                    broadcast(&self.shared, Event::Status(Box::new(now)));
+                }
             }
             total += keep.len();
             store.remove_missing(&root.path, &keep)?;
