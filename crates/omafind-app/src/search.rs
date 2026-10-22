@@ -15,7 +15,7 @@ use gpui_kit::component::input::{InlineToken, InputEvent, InputState};
 use gpui_kit::{
     AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
     KeyDownEvent, ParentElement as _, Render, ScrollStrategy, Styled as _, Subscription, Task,
-    Window, div,
+    Window, div, prelude::FluentBuilder as _,
 };
 use omafind_client::{Passage, Recents, Reply, Request};
 use omafind_core::{FileKind, Hit, Locator};
@@ -130,6 +130,14 @@ pub struct SearchView {
     pub(crate) like: Option<Hit>,
     /// The indexing progress, opened from the footer while files are being found or read.
     pub(crate) progress_open: bool,
+    /// Filters offered for the word at the caret (the "Typing filters" board).
+    pub(crate) completion: Option<crate::completion::Completion>,
+    /// The field's text when Esc closed the list: it stays closed until the text changes.
+    completion_closed_for: Option<String>,
+    /// The indexed folders and their subfolders, as `~/…`, for `in:`.
+    folder_choices: Vec<String>,
+    /// The roots `folder_choices` was made from.
+    folder_roots: Vec<std::path::PathBuf>,
     /// `None` follows the filter (photos are a grid); Ctrl+G overrides it.
     grid: Option<bool>,
     pub(crate) cols: usize,
@@ -187,6 +195,10 @@ impl SearchView {
             menu: None,
             like: None,
             progress_open: false,
+            completion: None,
+            completion_closed_for: None,
+            folder_choices: Vec::new(),
+            folder_roots: Vec::new(),
             grid: None,
             cols: 4,
             list_w: 500.,
@@ -223,9 +235,12 @@ impl SearchView {
                 self.open_setup(true, window, cx);
             }
         }
+        self.load_folders(cx);
         if shown != self.shown {
             // Shown again: fresh field, keyboard on it, recents up to date.
             self.shown = shown;
+            self.completion = None;
+            self.progress_open = false;
             self.query.update(cx, |q, cx| q.set_value("", window, cx));
             self.results.clear();
             self.took_ms = None;
@@ -322,7 +337,79 @@ impl SearchView {
         self.tokenize(window, cx);
         self.history_at = None;
         self.like = None;
+        self.update_completion(cx);
         self.schedule(cx);
+    }
+
+    /// Offers the filters the word at the caret could become.
+    fn update_completion(&mut self, cx: &mut Context<Self>) {
+        let input = self.query.read(cx);
+        let content = input.content();
+        let text = content.text().to_string();
+        if self.completion_closed_for.as_deref() == Some(text.as_str()) {
+            self.completion = None;
+            return;
+        }
+        self.completion_closed_for = None;
+        let taken: Vec<std::ops::Range<usize>> =
+            content.tokens().iter().map(|t| t.range()).collect();
+        let today = jiff::Zoned::now().date();
+        self.completion =
+            crate::completion::complete(&text, input.cursor(), &taken, &self.folder_choices, today);
+    }
+
+    /// Takes the highlighted filter: it replaces the word, a space follows, and the field turns it into a chip.
+    pub(crate) fn accept_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(completion) = self.completion.take() else {
+            return;
+        };
+        let text = format!("{} ", completion.items[completion.selected].text);
+        self.query.update(cx, |q, cx| {
+            q.set_selected_range(completion.range.clone(), cx);
+            q.replace(text, window, cx);
+        });
+        self.changed(window, cx);
+        cx.notify();
+    }
+
+    /// After the field was edited from code (a chip removed): what typing would have done.
+    pub(crate) fn refresh_after_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.changed(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn pick_completion(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(completion) = self.completion.as_mut() {
+            completion.selected = index;
+        }
+        self.accept_completion(window, cx);
+    }
+
+    /// The indexed folders and the folders in them, two levels down, for `in:`; made again when the roots change.
+    fn load_folders(&mut self, cx: &mut Context<Self>) {
+        let roots: Vec<std::path::PathBuf> = cx
+            .global::<AppState>()
+            .roots()
+            .iter()
+            .filter(|r| !r.code)
+            .map(|r| r.path.clone())
+            .collect();
+        if roots == self.folder_roots {
+            return;
+        }
+        self.folder_roots = roots.clone();
+        cx.spawn(async move |this, cx| {
+            let found = cx
+                .background_spawn(async move { crate::completion::folders_under(&roots, 2) })
+                .await;
+            let _ = this.update(cx, |this, _| this.folder_choices = found);
+        })
+        .detach();
     }
 
     /// The first completed filter in the field that isn't a chip yet becomes one. The chip takes the space after it
@@ -832,6 +919,24 @@ impl SearchView {
                 .setup
                 .update(cx, |setup, cx| setup.key(key, window, cx));
         }
+        if let Some(completion) = self.completion.as_mut() {
+            let n = completion.items.len();
+            match key {
+                "down" | "ctrl-n" | "ctrl-j" => completion.selected = (completion.selected + 1) % n,
+                "up" | "ctrl-p" => completion.selected = (completion.selected + n - 1) % n,
+                "tab" => {
+                    self.accept_completion(window, cx);
+                    return true;
+                }
+                "escape" => {
+                    self.completion = None;
+                    self.completion_closed_for = Some(self.query.read(cx).value().to_string());
+                }
+                _ => return false,
+            }
+            cx.notify();
+            return true;
+        }
         if let Some(menu) = self.menu.as_mut() {
             let n = menu.items.len();
             match key {
@@ -987,10 +1092,23 @@ impl Render for SearchView {
                 .child(self.render_preview(cx))
                 .into_any_element()
         };
+        // While filters are offered, the results stand back, as on the board.
+        let body = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .when(self.completion.is_some(), |d| d.opacity(0.55))
+            .child(body);
         root.child(self.render_header(cx))
             .child(self.render_filters(cx))
             .child(body)
             .child(self.render_footer(cx))
+            .children(
+                self.completion
+                    .is_some()
+                    .then(|| self.render_completion(cx)),
+            )
             .children(self.menu.is_some().then(|| self.render_menu(cx)))
             .into_any_element()
     }
@@ -1017,5 +1135,227 @@ mod tests {
         );
         // Inside a word is not a filter.
         assert_eq!(completed_filters("within:x "), vec![]);
+    }
+}
+
+/// UI integration tests: the real view in a headless window, driven by keys and typing as a person would. Nothing here
+/// presses Escape on the search screen or Enter on a result: those hide the real Omafind workspace and open files.
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use gpui_kit::test::TestWindowExt as _;
+    use gpui_kit::{
+        AnyWindowHandle, Bounds, KeyBinding, TestAppContext, WindowBounds, WindowOptions, px, size,
+    };
+    use omafind_core::{ChunkKind, Reason};
+
+    fn hit(id: i64, name: &str) -> Hit {
+        Hit {
+            file_id: id,
+            chunk_id: id,
+            path: format!("/nonexistent/omafind-ui-test/{name}"),
+            name: name.into(),
+            kind: FileKind::Doc,
+            chunk_kind: ChunkKind::Passage,
+            locator: None,
+            locator_end: None,
+            locator_label: String::new(),
+            snippet: format!("about {name}"),
+            score: 1.,
+            similarity: None,
+            matched_words: Vec::new(),
+            reason: Reason::Text,
+            mtime: 0,
+            size: 0,
+            duplicates: Vec::new(),
+        }
+    }
+
+    /// A window with the search view, as `main` opens it, talking to no daemon.
+    fn open(cx: &mut TestAppContext) -> (AnyWindowHandle, Entity<SearchView>) {
+        // A test search must never reach the real daemon (it would land in the search history).
+        unsafe { std::env::set_var("OMAFIND_SOCKET", "/nonexistent/omafind-ui-test.sock") };
+        cx.update(|cx| {
+            gpui_kit::init(cx);
+            cx.set_global(AppState {
+                daemon: true,
+                configured: true,
+                ..Default::default()
+            });
+            cx.bind_keys([
+                KeyBinding::new("tab", NextFilter, Some("Omafind")),
+                KeyBinding::new("shift-tab", PreviousFilter, Some("Omafind")),
+            ]);
+            let options = WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                    Default::default(),
+                    size(px(1400.), px(900.)),
+                ))),
+                ..Default::default()
+            };
+            gpui_kit::open_window(options, cx, |window, cx| {
+                cx.new(|cx| SearchView::new(window, cx))
+            })
+            .unwrap()
+        })
+    }
+
+    fn show(view: &Entity<SearchView>, names: &[&str], cx: &mut TestAppContext) {
+        let hits = names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| hit(i as i64 + 1, n))
+            .collect();
+        cx.update(|cx| {
+            view.update(cx, |v, cx| {
+                v.show(
+                    Reply {
+                        hits,
+                        ..Default::default()
+                    },
+                    "lease".into(),
+                    false,
+                    1.,
+                    cx,
+                )
+            })
+        });
+    }
+
+    fn press(window: AnyWindowHandle, keys: &[&str], cx: &mut TestAppContext) {
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            for key in keys {
+                window.press(key, cx);
+            }
+        })
+        .unwrap();
+    }
+
+    fn read<R>(
+        view: &Entity<SearchView>,
+        cx: &mut TestAppContext,
+        f: impl FnOnce(&SearchView, &gpui_kit::App) -> R,
+    ) -> R {
+        cx.update(|cx| f(view.read(cx), cx))
+    }
+
+    #[gpui_kit::test]
+    fn arrow_keys_move_the_selection_and_stop_at_the_ends(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        show(&view, &["lease.pdf", "rules.pdf", "checklist.md"], cx);
+        press(window, &["down"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.selected), 1);
+        press(window, &["down", "down", "down"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.selected), 2);
+        press(window, &["up", "ctrl-p"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.selected), 0);
+        press(window, &["ctrl-n", "pageup"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.selected), 0);
+        press(window, &["pagedown"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.selected), 2);
+    }
+
+    #[gpui_kit::test]
+    fn tab_cycles_the_filters_and_ctrl_g_flips_the_layout(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        show(&view, &["lease.pdf"], cx);
+        press(window, &["tab"], cx);
+        assert_eq!(read(&view, cx, |v, _| (v.filter, v.is_grid())), (1, true));
+        press(window, &["tab", "shift-tab", "shift-tab"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.filter), 0);
+        press(window, &["shift-tab"], cx);
+        assert_eq!(read(&view, cx, |v, _| v.filter), FILTERS.len() - 1);
+        press(window, &["tab", "ctrl-g"], cx);
+        assert_eq!(read(&view, cx, |v, _| (v.filter, v.is_grid())), (0, true));
+        press(window, &["ctrl-g"], cx);
+        assert!(!read(&view, cx, |v, _| v.is_grid()));
+    }
+
+    #[gpui_kit::test]
+    fn the_actions_menu_moves_asks_before_trashing_and_closes(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        show(&view, &["lease.pdf", "rules.pdf"], cx);
+        press(window, &["down", "ctrl-k"], cx);
+        let (items, name) = read(&view, cx, |v, _| {
+            let menu = v.menu.as_ref().expect("Ctrl+K opens the menu");
+            (menu.items.len(), menu.hit.name.clone())
+        });
+        assert_eq!(name, "rules.pdf");
+        // Up from the first item wraps to the last: Move to trash.
+        press(window, &["up"], cx);
+        assert_eq!(
+            read(&view, cx, |v, _| v.menu.as_ref().unwrap().selected),
+            items - 1
+        );
+        press(window, &["enter"], cx);
+        assert!(
+            read(&view, cx, |v, _| v.menu.as_ref().unwrap().confirm),
+            "trash asks again first"
+        );
+        press(window, &["down"], cx);
+        assert!(
+            !read(&view, cx, |v, _| v.menu.as_ref().unwrap().confirm),
+            "moving away cancels the question"
+        );
+        press(window, &["escape"], cx);
+        assert!(read(&view, cx, |v, _| v.menu.is_none()));
+        assert_eq!(
+            read(&view, cx, |v, _| v.results.len()),
+            2,
+            "nothing was trashed"
+        );
+    }
+
+    #[gpui_kit::test]
+    fn typing_a_filter_offers_completions_and_tab_makes_a_chip(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("invoice af", cx);
+        })
+        .unwrap();
+        let first = read(&view, cx, |v, _| {
+            v.completion.as_ref().map(|c| c.items[0].text.clone())
+        });
+        assert_eq!(
+            first.as_deref(),
+            Some(format!("after:{}", jiff::Zoned::now().year()).as_str())
+        );
+        press(window, &["down", "tab"], cx);
+        let (text, chips, open) = read(&view, cx, |v, cx| {
+            let content = v.query.read(cx).content();
+            (
+                content.text().to_string(),
+                content.tokens().len(),
+                v.completion.is_some(),
+            )
+        });
+        assert_eq!(text, "invoice after:last-month ");
+        assert_eq!(chips, 1, "the completed filter is a chip");
+        assert!(!open);
+    }
+
+    #[gpui_kit::test]
+    fn escape_closes_the_list_until_the_text_changes(cx: &mut TestAppContext) {
+        let (window, view) = open(cx);
+        cx.update_window(window, |_, window, cx| {
+            window.render_frame(cx);
+            window.input("ty", cx);
+        })
+        .unwrap();
+        assert!(read(&view, cx, |v, _| v.completion.is_some()));
+        press(window, &["escape"], cx);
+        assert!(read(&view, cx, |v, _| v.completion.is_none()));
+        cx.update_window(window, |_, window, cx| window.input("pe:p", cx))
+            .unwrap();
+        let items = read(&view, cx, |v, _| {
+            v.completion.as_ref().map(|c| c.items.len())
+        });
+        assert_eq!(
+            items,
+            Some(2),
+            "typing again offers type:photos and type:pdf"
+        );
     }
 }

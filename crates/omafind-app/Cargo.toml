@@ -26,3 +26,7 @@ zbus = "5"
 async-channel = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+# UI integration tests drive the real window headlessly (keys, typing, clicks).
+gpui-kit = { workspace = true, features = ["test-support"] }

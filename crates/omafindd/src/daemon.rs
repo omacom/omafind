@@ -33,6 +33,9 @@ pub enum Msg {
     Worker(Line),
     WorkerExited,
     Shutdown,
+    /// The package was upgraded: stop cleanly and run the new binary, at this path (read at start: once replaced,
+    /// `current_exe` names the deleted file).
+    Restart(PathBuf),
 }
 
 /// What every thread may read: the state the status reports, and where to send events.
@@ -281,6 +284,19 @@ pub fn main() -> Result<()> {
         omafind_core::paths::tilde(&index_path)
     );
     let _ = tx.send(Msg::Crawl);
+    // Leaked: the watcher must live as long as the process.
+    match std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|exe| {
+            let tx = tx.clone();
+            let path = exe.clone();
+            crate::upgrade::watch(exe, move || {
+                let _ = tx.send(Msg::Restart(path.clone()));
+            })
+        }) {
+        Ok(watcher) => std::mem::forget(watcher),
+        Err(error) => crate::log!("not watching for upgrades: {error:#}"),
+    }
     coordinator.run(rx)
 }
 
@@ -357,16 +373,30 @@ impl Coordinator {
                 }
                 Msg::Shutdown => {
                     crate::log!("shutting down");
-                    if let Some(mut worker) = self.worker.take() {
-                        let _ = worker.stdin.write_all(b"quit\n");
-                        let _ = worker.child.wait();
-                    }
-                    let _ = std::fs::remove_file(omafind_client::socket_path());
+                    self.stop();
                     return Ok(());
+                }
+                Msg::Restart(exe) => {
+                    crate::log!("upgraded: restarting into the new binary");
+                    self.stop();
+                    // Same process, new code: systemd keeps tracking it, and the window reconnects to the socket.
+                    let error = std::os::unix::process::CommandExt::exec(
+                        &mut std::process::Command::new(exe),
+                    );
+                    return Err(anyhow::anyhow!("restarting: {error}"));
                 }
             }
         }
         Ok(())
+    }
+
+    /// Stops the worker and leaves the socket path free.
+    fn stop(&mut self) {
+        if let Some(mut worker) = self.worker.take() {
+            let _ = worker.stdin.write_all(b"quit\n");
+            let _ = worker.child.wait();
+        }
+        let _ = std::fs::remove_file(omafind_client::socket_path());
     }
 
     fn watch_roots(&mut self) {

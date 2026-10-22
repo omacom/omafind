@@ -139,7 +139,9 @@ impl Palette {
             c.danger = self.red;
             c.danger_foreground = self.background;
             c.border = self.muted;
-            c.input = self.muted;
+            // Control outlines (an unticked checkbox): the divider color is too faint for a box that must read as
+            // a choice, so halfway to the muted text.
+            c.input = self.control_outline();
             c.ring = self.accent;
             c.selection = self.selection;
             c.caret = self.foreground;
@@ -156,6 +158,17 @@ impl Palette {
 }
 
 impl Palette {
+    /// The outline of a control that must read as one, an unticked checkbox: the divider color alone is too faint, so
+    /// it moves toward the text until it stands out 3:1 from the background (WCAG's mark for controls).
+    pub fn control_outline(&self) -> Hsla {
+        let steps = (2..=4).map(|i| mix(self.muted, self.muted_foreground, i as f32 / 4.));
+        let further = (1..=4).map(|i| mix(self.muted_foreground, self.foreground, i as f32 / 4.));
+        steps
+            .chain(further)
+            .find(|c| contrast(*c, self.background) >= 3.0)
+            .unwrap_or(self.foreground)
+    }
+
     /// The selected row: the foreground at 8 % over the background, as Omarchy's menu draws it.
     pub fn selected_row(&self) -> Hsla {
         mix(self.background, self.foreground, 0.08)
@@ -293,6 +306,7 @@ mod tests {
             let text_contrast = contrast(palette.foreground, palette.background);
             let title_contrast = contrast(palette.selected_title(), palette.selected_row());
             let muted_contrast = contrast(palette.muted_foreground, palette.background);
+            let outline_contrast = contrast(palette.control_outline(), palette.background);
             assert!(
                 text_contrast >= 4.5,
                 "{}: text {text_contrast:.2}",
@@ -301,6 +315,11 @@ mod tests {
             assert!(
                 title_contrast >= 3.0,
                 "{}: selected title {title_contrast:.2}",
+                entry.file_name().to_string_lossy()
+            );
+            assert!(
+                outline_contrast >= 3.0,
+                "{}: checkbox outline {outline_contrast:.2}",
                 entry.file_name().to_string_lossy()
             );
             assert!(

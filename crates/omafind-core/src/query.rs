@@ -77,9 +77,18 @@ fn midnight(date: Date, tz: &Zoned) -> Option<i64> {
         .map(|z| z.timestamp().as_second())
 }
 
-/// `2025`, `2025-03`, `2025-03-14` → the first second of that period and of the next one.
+/// `2025`, `2025-03`, `2025-03-14`, or a date word joined by hyphens (`last-month`, `this-year`, `yesterday`) → the
+/// first second of that period and of the next one.
 fn period(value: &str, now: &Zoned) -> Option<(i64, i64, String)> {
     let parts: Vec<&str> = value.split('-').collect();
+    if parts
+        .first()
+        .is_some_and(|p| p.starts_with(|c: char| c.is_ascii_alphabetic()))
+    {
+        return relative(&parts, now)
+            .filter(|&(.., used)| used == parts.len())
+            .map(|(start, end, label, _)| (start, end, label));
+    }
     let year: i16 = parts
         .first()?
         .parse()
@@ -302,6 +311,20 @@ mod tests {
     fn at(input: &str) -> Parsed {
         let now: Zoned = "2026-10-15T10:00:00[UTC]".parse().unwrap();
         parse_at(input, &now, Path::new("/home/u"))
+    }
+
+    #[test]
+    fn dates_in_filters_can_be_words() {
+        // Thursday 15 Oct 2026.
+        let p = at("invoice after:last-month");
+        assert_eq!(p.text, "invoice");
+        assert_eq!(p.chips[0].label, "since last month");
+        let sep_1: Zoned = "2026-09-01T00:00:00[UTC]".parse().unwrap();
+        assert_eq!(p.after, Some(sep_1.timestamp().as_second()));
+        assert_eq!(at("before:this-year").chips[0].label, "before this year");
+        assert_eq!(at("on:yesterday").chips[0].label, "yesterday");
+        // Not a date word: stays text.
+        assert_eq!(at("after:lunch").text, "after:lunch");
     }
 
     #[test]

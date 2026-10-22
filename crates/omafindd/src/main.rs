@@ -10,6 +10,7 @@ mod daemon;
 mod power;
 mod searcher;
 mod server;
+mod upgrade;
 mod watcher;
 mod worker;
 

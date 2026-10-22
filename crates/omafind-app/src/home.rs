@@ -4,7 +4,7 @@
 use gpui_kit::base::{StyledExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px, relative,
+    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px,
 };
 use omafind_core::Hit;
 
@@ -296,6 +296,9 @@ impl SearchView {
                 left = note;
             }
             setup.hints(self.first_run)
+        } else if self.completion.is_some() {
+            left = "Filters become chips · ⌫ on an empty word removes the last chip".to_owned();
+            "⇥ complete · esc close list".to_owned()
         } else if self.progress_open {
             "esc back".to_owned()
         } else if self.menu.is_some() {
@@ -455,15 +458,12 @@ pub(crate) fn indexing(s: &AppState, cx: &App) -> AnyElement {
                                     .text_color(c.foreground)
                                     .child(format::kind_title(*kind)),
                             )
-                            .child(
-                                div().flex_1().h(px(6.)).rounded(px(3.)).bg(c.muted).child(
-                                    div()
-                                        .h(px(6.))
-                                        .rounded(px(3.))
-                                        .bg(c.primary)
-                                        .w(relative(fraction)),
-                                ),
-                            )
+                            .child(div().flex_1().child(crate::widgets::bar(
+                                format!("indexed-{}", kind.as_str()),
+                                fraction,
+                                6.,
+                                cx,
+                            )))
                             .child(div().w(px(120.)).text_color(c.muted_foreground).child(
                                 if done == total {
                                     format!("{} done", format::count(*total))

@@ -226,6 +226,21 @@ holds the coding rules; read it before structural changes.
   actions bound in the `Omafind` key context, or focus traversal takes them. The setup entity gets keys forwarded.
 - Bar buttons are gpui-base's unstyled `Button` with `focusable(false)`: clicking one leaves the keyboard on the field.
 - Searches are numbered; an answer older than the one shown is dropped (two filters' searches can finish out of order).
+- Filter completion (`completion.rs`, the "Typing filters" board): the word at the caret offers what it could become;
+  only Tab takes one (Enter still opens the result, so everyday words like "last" or "in" can't hijack it). Chips
+  come out with a click (their ×) or ⌫. Date filters take words too: `after:last-month`, `on:yesterday`.
+- GPUI Component pieces in use: `Input` (field + chips), `TextView` (passages), `Progress` (`widgets::bar`),
+  `Spinner`, `Checkbox` (display only; the setup row takes the click). `Kbd`, `Tag` and `Stepper` were tried against
+  the canvas and draw differently (`Kbd` spells "Ctrl+S", not ⌃S), so keycaps, pills and the steps stay hand-drawn.
+- Upgrades: omafindd and omafind-app watch their own executable (`upgrade.rs`); when pacman replaces it, the daemon
+  stops its worker and execs the new binary, the window does so once it is hidden.
+- UI integration tests (`ui_tests` in search.rs and settings.rs, `cargo test -p omafind-app ui_tests`) drive the real
+  views headlessly with keys. They never press Escape on the search screen or Enter on a result (those reach the
+  real Hyprland and open files), nor save in setup (that writes the real config). The test search socket is
+  pointed nowhere so nothing lands in the real search history.
+- Adding `test-support` to gpui-kit made Cargo resolve GPUI Fast for every platform; `cocoa` (0.26.0) and
+  `unicode-properties` (0.1.3) are pinned to the versions gpui-kit's own lockfile has. Re-pin if `cargo update`
+  moves them: `cargo update -p <crate> --precise <ver>` with the dev-dependency taken out first.
 - Async: `cx.spawn` + `cx.background_spawn(service::…)` for anything blocking; never block the main thread.
 - Rust 2024 captures argument lifetimes in `impl IntoElement` returns: helpers that take references return
   `AnyElement`.
@@ -252,7 +267,10 @@ The tool shell has no Wayland env. Before launching anything graphical:
 export XDG_RUNTIME_DIR=/run/user/1000 WAYLAND_DISPLAY=wayland-1 HYPRLAND_INSTANCE_SIGNATURE=$(ls /run/user/1000/hypr | head -1)
 ```
 
-Then `./target/debug/omafind-app &`, `hyprctl clients -j` (class `omafind`), `hyprctl dispatch focuswindow class:omafind`,
+Then `./target/debug/omafind-app &`, `hyprctl clients -j` (class `omafind`). The installed Omafind lives in
+`special:omafind` too and draws over a test window there: move the test window to a workspace of its own first,
+`hl.dsp.window.move({ workspace = "special:omafindtest", follow = true, window = "address:…" })`, and close it after
+(`toggle_special("omafindtest")`), so the real one is never shown or typed into. Then
 `wtype -k Tab; wtype 'query'`, `grim -o eDP-1 shot.png` (3840×2160, scale 1.6), stop it by PID (`pkill -x omafind-app` also closes the real window). Never
 `pkill -f`: it matches the tool's own shell.
 

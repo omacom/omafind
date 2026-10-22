@@ -9,7 +9,7 @@ use gpui_kit::component::input::{InlineTokenContext, Input};
 use gpui_kit::{
     AnyElement, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _,
     StatefulInteractiveElement as _, Styled as _, Window, div, img, prelude::FluentBuilder as _,
-    px, relative, size,
+    px, size,
 };
 use omafind_core::{FileKind, Hit, Reason};
 
@@ -57,6 +57,17 @@ impl SearchView {
                 .bg(c.background)
                 .text_size(px(15.))
                 .token(chip_token)
+                .on_token_click({
+                    // A chip clicked comes out, as its × says; the search follows.
+                    let (query, view) = (self.query.clone(), cx.entity().downgrade());
+                    move |event, window, cx| {
+                        query.update(cx, |q, cx| {
+                            q.set_selected_range(event.range(), cx);
+                            q.replace("", window, cx);
+                        });
+                        let _ = view.update(cx, |view, cx| view.refresh_after_edit(window, cx));
+                    }
+                })
                 .into_any_element(),
         };
         let took = match self.took_ms {
@@ -98,7 +109,7 @@ impl SearchView {
                     .w_full()
                     .h(px(2.))
                     .bg(c.border)
-                    .child(div().h(px(2.)).w(relative(done)).bg(c.primary))
+                    .child(crate::widgets::bar("indexing-line", done, 2., cx))
             } else {
                 div().h(px(1.)).w_full().bg(c.border)
             })
@@ -504,6 +515,70 @@ impl SearchView {
         img(path.to_path_buf()).w(px(fw)).h(px(fh)).rounded(px(3.))
     }
 
+    /// The filters offered for the word at the caret, in a list under it.
+    pub(crate) fn render_completion(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(completion) = &self.completion else {
+            return div().into_any_element();
+        };
+        let c = colors(cx);
+        // Under the word being typed: the caret, less the word, in the field's monospace.
+        let input = self.query.read(cx);
+        let caret = input
+            .cursor_layout()
+            .map(|(bounds, _)| f32::from(bounds.origin.x));
+        let typed = input.value()[completion.range.clone()].chars().count() as f32;
+        let left = caret.map_or(60., |x| (x - typed * 9.).max(12.));
+        v_flex()
+            .id("completion")
+            .absolute()
+            .top(px(46.))
+            .left(px(left))
+            .w(px(340.))
+            .p(px(4.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c.border)
+            .bg(c.surface)
+            .shadow_lg()
+            .children(completion.items.iter().enumerate().map(|(i, item)| {
+                let selected = i == completion.selected;
+                clickable(format!("suggestion-{i}"))
+                    .flex()
+                    .justify_between()
+                    .px(px(10.))
+                    .py(px(8.))
+                    .rounded(px(4.))
+                    .text_size(px(12.))
+                    .when(selected, |d| d.bg(c.accent))
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.pick_completion(i, window, cx)),
+                    )
+                    .child(
+                        div()
+                            .text_color(if selected { c.primary } else { c.foreground })
+                            .child(item.text.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_color(c.muted_foreground)
+                            .child(item.note.clone()),
+                    )
+            }))
+            .child(
+                div()
+                    .mt(px(2.))
+                    .px(px(10.))
+                    .pt(px(6.))
+                    .pb(px(4.))
+                    .border_t_1()
+                    .border_color(c.border)
+                    .text_size(px(10.))
+                    .text_color(c.muted_foreground)
+                    .child("⇥ complete · words like \"last week\" work too"),
+            )
+            .into_any_element()
+    }
+
     pub(crate) fn render_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let Some(menu) = &self.menu else {
             return div().into_any_element();
@@ -636,6 +711,15 @@ fn chip_token(token: &InlineTokenContext, _: &mut Window, cx: &mut App) -> AnyEl
             c.foreground
         })
         .child(label)
+        .child(
+            div()
+                .text_color(if token.is_selected() {
+                    c.primary_foreground
+                } else {
+                    c.muted_foreground
+                })
+                .child("×"),
+        )
         .into_any_element()
 }
 

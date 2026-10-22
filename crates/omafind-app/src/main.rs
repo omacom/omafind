@@ -6,6 +6,7 @@
 //! for the footer, and Omarchy's theme for its colors.
 
 mod actions;
+mod completion;
 mod format;
 mod home;
 mod hypr;
@@ -17,6 +18,7 @@ mod service;
 mod settings;
 mod state;
 mod theme;
+mod upgrade;
 mod widgets;
 
 use std::time::Duration;
@@ -48,6 +50,16 @@ enum Note {
     Theme,
     /// Closed before it was ever set up: nothing keeps the process around.
     Quit,
+    /// The package was upgraded: run the new binary at this path once the window is out of sight.
+    Upgraded(std::path::PathBuf),
+}
+
+/// Replaces this process with the new binary. The window rules put the new window in the special workspace, hidden,
+/// as the autostart one is.
+fn restart(exe: &std::path::Path) {
+    tracing::info!("upgraded: restarting into the new binary");
+    let error = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new(exe));
+    tracing::warn!("restarting: {error}");
 }
 
 /// Closes the special workspace if it is open; an ordinary window (opened from the launcher before setup added the
@@ -172,6 +184,19 @@ fn main() {
         }
     }
 
+    match std::env::current_exe()
+        .map_err(anyhow::Error::from)
+        .and_then(|exe| {
+            let tx = tx.clone();
+            let path = exe.clone();
+            upgrade::watch(exe, move || {
+                let _ = tx.send_blocking(Note::Upgraded(path.clone()));
+            })
+        }) {
+        Ok(watcher) => std::mem::forget(watcher),
+        Err(error) => tracing::warn!("not watching for upgrades: {error:#}"),
+    }
+
     // The first search must not pay for loading the query encoder: ask for it now, and again on every show.
     tell_daemon(Request::Warm);
     let font = theme::font_family();
@@ -223,6 +248,7 @@ fn main() {
 
             // Notes from the threads land on the main thread here, as changes to the app state the views observe.
             let font = font.clone();
+            let mut upgraded: Option<std::path::PathBuf> = None;
             cx.spawn(async move |cx| {
                 while let Ok(note) = rx.recv().await {
                     cx.update(|cx| match note {
@@ -253,6 +279,17 @@ fn main() {
                         Note::Hidden => {
                             cx.update_global::<AppState, _>(|s, _| s.visible = false);
                             tell_daemon(Request::Idle);
+                            if let Some(exe) = &upgraded {
+                                restart(exe);
+                            }
+                        }
+                        // Never under someone's hands: now if the window is hidden, else when it next is.
+                        Note::Upgraded(exe) => {
+                            if cx.global::<AppState>().visible {
+                                upgraded = Some(exe);
+                            } else {
+                                restart(&exe);
+                            }
                         }
                         Note::Quit => cx.quit(),
                         Note::Theme => match theme::Palette::load() {

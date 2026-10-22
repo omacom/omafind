@@ -200,3 +200,18 @@ impl BarButton {
 pub fn clickable(name: impl Into<SharedString>) -> gpui_kit::Stateful<Div> {
     div().id(id(name))
 }
+
+/// A progress bar, `fraction` of 0..1 filled, `height` tall: GPUI Component's `Progress`, in the accent, so it eases
+/// between values as the indexer reports them.
+pub fn bar(
+    name: impl Into<SharedString>,
+    fraction: f32,
+    height: f32,
+    cx: &App,
+) -> impl IntoElement {
+    use gpui_kit::component::{Sizable as _, progress::Progress};
+    Progress::new(id(name))
+        .value((fraction.clamp(0., 1.)) * 100.)
+        .with_size(px(height))
+        .color(colors(cx).primary)
+}

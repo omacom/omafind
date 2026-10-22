@@ -10,10 +10,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui_kit::base::{StyledExt as _, VirtualListScrollHandle, h_flex, v_flex, v_virtual_list};
+use gpui_kit::component::{Sizable as _, checkbox::Checkbox, spinner::Spinner};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, Render, ScrollStrategy, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px, relative, size,
+    Styled as _, Window, div, prelude::FluentBuilder as _, px, size,
 };
 
 use crate::format::{self, glyphs};
@@ -135,6 +136,19 @@ const EXAMPLES: [(&str, &str, &str, &str); 3] = [
         glyphs::MICROPHONE,
     ),
 ];
+
+/// What a row shows before its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    /// A choice: ticked or not.
+    Check(bool),
+    /// Already set up; nothing to choose.
+    Done,
+    /// The model files, to download.
+    Download,
+    /// Working on it.
+    Busy,
+}
 
 /// What a running operation blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1038,13 +1052,7 @@ impl Setup {
                 (false, false) => None,
             }
         };
-        let check = |on: bool| {
-            if on {
-                glyphs::CHECK_ON
-            } else {
-                glyphs::CHECK_OFF
-            }
-        };
+        let check = Mark::Check;
         match row {
             Row::Folder(i) | Row::Code(i) => {
                 let f = if matches!(row, Row::Folder(_)) {
@@ -1139,7 +1147,7 @@ impl Setup {
                     "Adds it to ~/.config/hypr/omafind.lua"
                 };
                 let mark = if have {
-                    glyphs::CHECK
+                    Mark::Done
                 } else {
                     check(self.shortcut)
                 };
@@ -1170,31 +1178,23 @@ impl Setup {
                     "Download the model files"
                 };
                 let mark = if self.downloading {
-                    glyphs::SPINNER
+                    Mark::Busy
                 } else if missing {
-                    glyphs::DOWNLOAD
+                    Mark::Download
                 } else {
-                    glyphs::CHECK
+                    Mark::Done
                 };
                 let note = (!missing).then(|| ("installed".to_owned(), c.muted_foreground));
                 v_flex()
                     .w_full()
                     .child(self.row(index, label, &caption, mark, note, false, cx))
                     .when_some(self.progress.as_ref(), |d, p| {
-                        d.child(
-                            div()
-                                .mx(px(12.))
-                                .h(px(3.))
-                                .rounded(px(2.))
-                                .bg(c.muted)
-                                .child(
-                                    div()
-                                        .h(px(3.))
-                                        .w(relative(p.fraction as f32))
-                                        .rounded(px(2.))
-                                        .bg(c.primary),
-                                ),
-                        )
+                        d.child(div().mx(px(12.)).child(crate::widgets::bar(
+                            "model-row",
+                            p.fraction as f32,
+                            3.,
+                            cx,
+                        )))
                     })
                     .into_any_element()
             }
@@ -1208,7 +1208,7 @@ impl Setup {
         index: usize,
         label: &str,
         caption: &str,
-        mark: &'static str,
+        mark: Mark,
         note: Option<(String, Hsla)>,
         dim: bool,
         cx: &mut Context<Self>,
@@ -1226,15 +1226,26 @@ impl Setup {
             .bg(if selected { c.accent } else { c.background })
             .on_click(cx.listener(move |this, _, _, cx| this.click_row(index, cx)))
             .child(
-                div()
-                    .w(px(16.))
-                    .text_size(px(15.))
-                    .text_color(if mark == glyphs::CHECK_ON {
-                        c.primary
-                    } else {
-                        c.muted_foreground
-                    })
-                    .child(mark),
+                div().w(px(16.)).flex().justify_center().child(match mark {
+                    // The row takes the click and the keyboard; the box only shows the choice.
+                    Mark::Check(on) => Checkbox::new(format!("check-{index}"))
+                        .checked(on)
+                        .tab_stop(false)
+                        .into_any_element(),
+                    Mark::Busy => Spinner::new()
+                        .with_size(px(14.))
+                        .color(c.primary)
+                        .into_any_element(),
+                    Mark::Done | Mark::Download => div()
+                        .text_size(px(15.))
+                        .text_color(c.muted_foreground)
+                        .child(if mark == Mark::Done {
+                            glyphs::CHECK
+                        } else {
+                            glyphs::DOWNLOAD
+                        })
+                        .into_any_element(),
+                }),
             )
             .child(
                 v_flex()
@@ -1664,14 +1675,7 @@ impl Setup {
                     .bg(c.surface)
                     .text_size(px(12.))
                     .child(div().w(px(170.)).font_medium().text_color(c.foreground).child("EmbeddingGemma 2"))
-                    .child(
-                        div()
-                            .flex_1()
-                            .h(px(6.))
-                            .rounded(px(3.))
-                            .bg(c.muted)
-                            .child(div().h(px(6.)).rounded(px(3.)).bg(c.primary).w(relative((done / total) as f32))),
-                    )
+                    .child(div().flex_1().child(crate::widgets::bar("model-download", (done / total) as f32, 6., cx)))
                     .child(div().w(px(110.)).flex().justify_end().text_color(c.muted_foreground).child(right)),
             )
             .child(
@@ -1786,5 +1790,121 @@ mod tests {
         assert_eq!(estimate("nothing to index"), 0.);
         assert_eq!(span(40.), "40 s");
         assert_eq!(span(330.), "6 min");
+    }
+}
+
+/// UI integration tests for setup's keyboard model, on made-up folders. Nothing here saves, starts or discards: those
+/// write the real config, Hyprland file and systemd unit, or survey the real home.
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use gpui_kit::{TestAppContext, VisualTestContext};
+
+    fn folder(name: &str, chosen: bool) -> Folder {
+        Folder {
+            path: PathBuf::from(format!("/nonexistent/{name}")),
+            label: format!("~/{name}"),
+            summary: "4 photos · ~3 s".into(),
+            selected: chosen,
+            chosen,
+        }
+    }
+
+    /// Setup as `load` leaves it, without surveying anything.
+    fn loaded(first_run: bool, cx: &mut TestAppContext) -> (Entity<Setup>, &mut VisualTestContext) {
+        let (setup, cx) = cx.add_window_view(|_, cx| {
+            gpui_kit::init(cx);
+            cx.set_global(AppState::default());
+            let mut setup = Setup::new(cx);
+            setup.first_run = first_run;
+            setup.loading = false;
+            setup.folders = vec![folder("Pictures", !first_run), folder("Documents", false)];
+            setup.configured = !first_run;
+            setup.saved = setup.snapshot();
+            setup
+        });
+        (setup, cx)
+    }
+
+    fn key(setup: &Entity<Setup>, key: &str, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| setup.update(cx, |s, cx| s.key(key, window, cx)))
+    }
+
+    #[gpui_kit::test]
+    fn settings_rows_move_toggle_and_ask_before_leaving(cx: &mut TestAppContext) {
+        let (setup, cx) = loaded(false, cx);
+        assert!(key(&setup, "down", cx));
+        assert_eq!(setup.read_with(cx, |s, _| s.cursor), 1);
+        key(&setup, "space", cx);
+        assert!(setup.read_with(cx, |s, _| s.folders[1].selected && s.is_dirty()));
+        assert!(
+            setup.read_with(cx, |s, _| s.can_save()),
+            "Save lights up once something changed"
+        );
+        assert_eq!(
+            setup.read_with(cx, |s, _| s.pending()),
+            "~/Documents adds ~3 s of indexing"
+        );
+        key(&setup, "escape", cx);
+        assert!(
+            setup.read_with(cx, |s, _| s.confirm),
+            "leaving with changes asks"
+        );
+        assert_eq!(
+            setup.read_with(cx, |s, _| s.hints(false)),
+            "⏎ save · d discard · esc keep editing"
+        );
+        key(&setup, "escape", cx);
+        assert!(
+            setup.read_with(cx, |s, _| !s.confirm && s.is_dirty()),
+            "keep editing keeps the change"
+        );
+        key(&setup, "space", cx);
+        assert!(
+            !setup.read_with(cx, |s, _| s.is_dirty()),
+            "toggling back is no change"
+        );
+        assert!(!setup.read_with(cx, |s, _| s.can_save()));
+    }
+
+    #[gpui_kit::test]
+    fn the_cursor_stays_within_the_rows(cx: &mut TestAppContext) {
+        let (setup, cx) = loaded(false, cx);
+        let rows = setup.read_with(cx, |s, _| s.rows().len());
+        for _ in 0..rows + 3 {
+            key(&setup, "down", cx);
+        }
+        assert_eq!(setup.read_with(cx, |s, _| s.cursor), rows - 1);
+        for _ in 0..rows + 3 {
+            key(&setup, "up", cx);
+        }
+        assert_eq!(setup.read_with(cx, |s, _| s.cursor), 0);
+    }
+
+    #[gpui_kit::test]
+    fn the_onboarding_steps_forward_and_back(cx: &mut TestAppContext) {
+        let (setup, cx) = loaded(true, cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Welcome);
+        key(&setup, "enter", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Model);
+        // The model files are on this machine (as `new` assumes until `load` says otherwise): Enter moves on.
+        key(&setup, "enter", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Folders);
+        // Nothing picked: Enter stays and says why.
+        key(&setup, "enter", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Folders);
+        assert_eq!(
+            setup.read_with(cx, |s, _| s.error.clone()).as_deref(),
+            Some("Pick at least one folder")
+        );
+        key(&setup, "space", cx);
+        key(&setup, "enter", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Shortcut);
+        assert_eq!(setup.read_with(cx, |s, _| s.rows()), vec![Row::Shortcut]);
+        key(&setup, "escape", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Folders);
+        key(&setup, "escape", cx);
+        key(&setup, "escape", cx);
+        assert_eq!(setup.read_with(cx, |s, _| s.step_kind()), Step::Welcome);
     }
 }

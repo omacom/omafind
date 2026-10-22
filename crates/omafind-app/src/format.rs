@@ -45,10 +45,7 @@ pub mod glyphs {
     pub const FOLDER: &str = "\u{f07b}";
     pub const GEAR: &str = "\u{f013}";
     pub const CHECK: &str = "\u{f00c}";
-    pub const CHECK_ON: &str = "\u{f14a}";
-    pub const CHECK_OFF: &str = "\u{f096}";
     pub const DOWNLOAD: &str = "\u{f019}";
-    pub const SPINNER: &str = "\u{f110}";
     pub const LOCK: &str = "\u{f023}";
     pub const CLOCK: &str = "\u{f017}";
     pub const PHOTO: &str = "\u{f03e}";
@@ -372,7 +369,16 @@ pub fn chip_label(text: &str) -> String {
                 "after" | "since" => "since",
                 other => other,
             };
-            format!("{} {word} {value}", glyphs::CLOCK)
+            // `last-month` is how the field spells "last month".
+            let value = if value.starts_with(|c: char| c.is_ascii_alphabetic()) {
+                value.replace('-', " ")
+            } else {
+                value.to_owned()
+            };
+            match key.as_str() {
+                "on" | "during" => format!("{} {value}", glyphs::CLOCK),
+                _ => format!("{} {word} {value}", glyphs::CLOCK),
+            }
         }
     }
 }
@@ -502,6 +508,8 @@ mod tests {
         assert_eq!(chip_label("type:pdf"), "PDFs");
         assert_eq!(chip_label("after:2025"), "\u{f017} since 2025");
         assert_eq!(chip_label("last week"), "\u{f017} last week");
+        assert_eq!(chip_label("after:last-month"), "\u{f017} since last month");
+        assert_eq!(chip_label("on:yesterday"), "\u{f017} yesterday");
     }
 
     #[test]
